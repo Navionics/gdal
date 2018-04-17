@@ -163,6 +163,8 @@ typedef enum {
 /** Lambert_Azimuthal_Equal_Area projection */
 #define SRS_PT_LAMBERT_AZIMUTHAL_EQUAL_AREA                     \
                                 "Lambert_Azimuthal_Equal_Area"
+/** Mercator Navionics projection */
+#define SRS_PT_MERCATOR_NAV     "Mercator_NAV"
 /** Mercator_1SP projection */
 #define SRS_PT_MERCATOR_1SP     "Mercator_1SP"
 /** Mercator_2SP projection */

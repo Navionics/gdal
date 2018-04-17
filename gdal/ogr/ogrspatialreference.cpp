@@ -5095,6 +5095,49 @@ OGRErr OSRSetMercator( OGRSpatialReferenceH hSRS,
         dfFalseEasting, dfFalseNorthing );
 }
 
+
+/************************************************************************/
+/*                       SetMercatorNavionics()                         */
+/************************************************************************/
+
+OGRErr OGRSpatialReference::SetMercatorNavionics( double dfCenterLat, 
+                                         double dfCenterLong,
+                                         double dfScale,
+                                         double dfFalseEasting,
+                                         double dfFalseNorthing )
+
+{
+    SetProjection( SRS_PT_MERCATOR_NAV );
+
+    if( dfCenterLat != 0.0 )
+        SetNormProjParm( SRS_PP_LATITUDE_OF_ORIGIN, dfCenterLat );
+
+    SetNormProjParm( SRS_PP_CENTRAL_MERIDIAN, dfCenterLong );
+    SetNormProjParm( SRS_PP_SCALE_FACTOR, dfScale );
+    SetNormProjParm( SRS_PP_FALSE_EASTING, dfFalseEasting );
+    SetNormProjParm( SRS_PP_FALSE_NORTHING, dfFalseNorthing );
+
+    return OGRERR_NONE;
+}
+
+/************************************************************************/
+/*                     OSRSetMercatorNavionics()                        */
+/************************************************************************/
+
+OGRErr OSRSetMercatorNavionics( OGRSpatialReferenceH hSRS,
+                       double dfCenterLat, double dfCenterLong,
+                       double dfScale,
+                       double dfFalseEasting, double dfFalseNorthing )
+
+{
+    VALIDATE_POINTER1( hSRS, "OSRSetMercatorNavionics", OGRERR_FAILURE );
+
+    return reinterpret_cast<OGRSpatialReference *>(hSRS)->SetMercatorNavionics(
+        dfCenterLat, dfCenterLong,
+        dfScale,
+        dfFalseEasting, dfFalseNorthing );
+}
+
 /************************************************************************/
 /*                           SetMercator2SP()                           */
 /************************************************************************/
