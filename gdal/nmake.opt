@@ -45,7 +45,7 @@
 #
 !IFNDEF MSVC_VER
 #assume msvc VS2008.
-MSVC_VER=1500
+MSVC_VER=1910
 !ENDIF
 
 ###############################################################################
@@ -61,7 +61,7 @@ MSVC_VER=1500
 # But the paths *should* be absolute (relative paths mess up in submakefiles).
 
 !IFNDEF GDAL_HOME
-GDAL_HOME = "C:\warmerda\bld"
+GDAL_HOME = "C:\MercatorNavionics"
 !ENDIF
 !IFNDEF BINDIR
 BINDIR = $(GDAL_HOME)\bin
@@ -217,7 +217,7 @@ STDCALL=YES
 # Version number embedded in DLL name. 
 # If GDAL version is X.Y.Z, VERSION = X * 100 + Y
 !IFNDEF VERSION
-VERSION =	202
+VERSION =	224
 !ENDIF
 
 # Comment the following out if you want PAM supported disabled
@@ -533,9 +533,9 @@ GRIB_SETTING=yes
 # PROJ.4 stuff
 # Uncomment the following lines to link PROJ.4 library statically. Otherwise
 # it will be linked dynamically during runtime.
-#PROJ_FLAGS = -DPROJ_STATIC
-#PROJ_INCLUDE = -Id:\projects\proj.4\src
-#PROJ_LIBRARY = d:\projects\proj.4\src\proj_i.lib
+PROJ_FLAGS = -DPROJ_STATIC
+PROJ_INCLUDE = -IC:\MercatorNavionics\include
+PROJ_LIBRARY = C:\MercatorNavionics\lib\proj_i.lib
 
 # Add ORACLE support.
 # Uncomment the following line to enable OCI Oracle Spatial support.

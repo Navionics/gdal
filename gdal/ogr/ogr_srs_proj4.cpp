@@ -701,7 +701,7 @@ OGRErr OGRSpatialReference::importFromProj4( const char * pszProj4 )
                      OSR_GDV( papszNV, "x_0", 0.0 ),
                      OSR_GDV( papszNV, "y_0", 0.0 ) );
     }
-    else if( EQUAL(pszProj, "merc_nav") )  // 1SP form.
+    else if( EQUAL(pszProj, "merc_nav") )  // Mercator Navionics
     {
         SetMercatorNavionics( 0.0,
                      OSR_GDV( papszNV, "lon_0", 0.0 ),
@@ -1683,15 +1683,25 @@ OGRErr OGRSpatialReference::exportToProj4( char ** ppszProj4 ) const
             return OGRERR_UNSUPPORTED_SRS;
         }
     }
-    else if( EQUAL(pszProjection, SRS_PT_MERCATOR_2SP) )
+    else if (EQUAL(pszProjection, SRS_PT_MERCATOR_2SP))
     {
-        CPLsnprintf(
-            szProj4 + strlen(szProj4), sizeof(szProj4) - strlen(szProj4),
-            "+proj=merc +lon_0=%.16g +lat_ts=%.16g +x_0=%.16g +y_0=%.16g ",
-            GetNormProjParm(SRS_PP_CENTRAL_MERIDIAN, 0.0),
-            GetNormProjParm(SRS_PP_STANDARD_PARALLEL_1, 0.0),
-            GetNormProjParm(SRS_PP_FALSE_EASTING, 0.0),
-            GetNormProjParm(SRS_PP_FALSE_NORTHING, 0.0) );
+      CPLsnprintf(
+        szProj4 + strlen(szProj4), sizeof(szProj4) - strlen(szProj4),
+        "+proj=merc +lon_0=%.16g +lat_ts=%.16g +x_0=%.16g +y_0=%.16g ",
+        GetNormProjParm(SRS_PP_CENTRAL_MERIDIAN, 0.0),
+        GetNormProjParm(SRS_PP_STANDARD_PARALLEL_1, 0.0),
+        GetNormProjParm(SRS_PP_FALSE_EASTING, 0.0),
+        GetNormProjParm(SRS_PP_FALSE_NORTHING, 0.0));
+    }
+    else if (EQUAL(pszProjection, SRS_PT_MERCATOR_NAV))
+    {
+      CPLsnprintf(
+        szProj4 + strlen(szProj4), sizeof(szProj4) - strlen(szProj4),
+        "+proj=merc_nav ",
+        GetNormProjParm(SRS_PP_CENTRAL_MERIDIAN, 0.0),
+        GetNormProjParm(SRS_PP_STANDARD_PARALLEL_1, 0.0),
+        GetNormProjParm(SRS_PP_FALSE_EASTING, 0.0),
+        GetNormProjParm(SRS_PP_FALSE_NORTHING, 0.0));
     }
     else if( EQUAL(pszProjection, SRS_PT_MERCATOR_AUXILIARY_SPHERE) )
     {

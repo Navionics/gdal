@@ -1533,6 +1533,13 @@ static OGRErr SetEPSGProjCS( OGRSpatialReference * poSRS, int nPCSCode )
 
         break;
 
+      case 9999:
+        poSRS->SetMercatorNavionics( OGR_FP( NatOriginLat ), OGR_FP( NatOriginLong ),
+                            OGR_FP( NatOriginScaleFactor ),
+                            OGR_FP( FalseEasting ), OGR_FP( FalseNorthing ) );
+
+        break;
+
       case 9804:
       case 9841:  // Mercator 1SP (Spherical).
       case 1024:  // Google Mercator.
