@@ -1703,6 +1703,16 @@ OGRErr OGRSpatialReference::exportToProj4( char ** ppszProj4 ) const
         GetNormProjParm(SRS_PP_FALSE_EASTING, 0.0),
         GetNormProjParm(SRS_PP_FALSE_NORTHING, 0.0));
     }
+    else if( EQUAL(pszProjection, SRS_PT_MERCATOR_NAV) )
+    {
+        CPLsnprintf(
+            szProj4 + strlen(szProj4), sizeof(szProj4) - strlen(szProj4),
+            "+proj=merc_nav +lon_0=%.16g +lat_ts=%.16g +x_0=%.16g +y_0=%.16g ",
+            GetNormProjParm(SRS_PP_CENTRAL_MERIDIAN, 0.0),
+            GetNormProjParm(SRS_PP_STANDARD_PARALLEL_1, 0.0),
+            GetNormProjParm(SRS_PP_FALSE_EASTING, 0.0),
+            GetNormProjParm(SRS_PP_FALSE_NORTHING, 0.0) );
+    }
     else if( EQUAL(pszProjection, SRS_PT_MERCATOR_AUXILIARY_SPHERE) )
     {
        // This is EPSG:3875 Pseudo Mercator. No point in trying to parse the
