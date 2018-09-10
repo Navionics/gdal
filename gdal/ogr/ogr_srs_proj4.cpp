@@ -708,6 +708,14 @@ OGRErr OGRSpatialReference::importFromProj4( const char * pszProj4 )
                      OSR_GDV( papszNV, "x_0", 0.0 ),
                      OSR_GDV( papszNV, "y_0", 0.0 ) );
     }
+    else if( EQUAL(pszProj, "merc_nav") )  // Mercator Navionics
+    {
+        SetMercatorNavionics( 0.0,
+                     OSR_GDV( papszNV, "lon_0", 0.0 ),
+                     OSR_GDV( papszNV, "k", 1.0 ),
+                     OSR_GDV( papszNV, "x_0", 0.0 ),
+                     OSR_GDV( papszNV, "y_0", 0.0 ) );
+    }
     else if( EQUAL(pszProj, "stere")
              && std::abs(OSR_GDV( papszNV, "lat_0", 0.0 ) - 90) < 0.001 )
     {
@@ -1685,7 +1693,7 @@ OGRErr OGRSpatialReference::exportToProj4( char ** ppszProj4 ) const
             return OGRERR_UNSUPPORTED_SRS;
         }
     }
-    else if( EQUAL(pszProjection, SRS_PT_MERCATOR_2SP) )
+    else if (EQUAL(pszProjection, SRS_PT_MERCATOR_2SP))
     {
         if( GetNormProjParm(SRS_PP_LATITUDE_OF_ORIGIN, 0.0) == 0.0 )
         {
@@ -1705,6 +1713,16 @@ OGRErr OGRSpatialReference::exportToProj4( char ** ppszProj4 ) const
             *ppszProj4 = CPLStrdup("");
             return OGRERR_UNSUPPORTED_SRS;
         }
+    }
+    else if (EQUAL(pszProjection, SRS_PT_MERCATOR_NAV))
+    {
+      CPLsnprintf(
+        szProj4 + strlen(szProj4), sizeof(szProj4) - strlen(szProj4),
+        "+proj=merc_nav ",
+        GetNormProjParm(SRS_PP_CENTRAL_MERIDIAN, 0.0),
+        GetNormProjParm(SRS_PP_STANDARD_PARALLEL_1, 0.0),
+        GetNormProjParm(SRS_PP_FALSE_EASTING, 0.0),
+        GetNormProjParm(SRS_PP_FALSE_NORTHING, 0.0));
     }
     else if( EQUAL(pszProjection, SRS_PT_MERCATOR_AUXILIARY_SPHERE) )
     {

@@ -54,7 +54,7 @@ MSVC_VER=1900
 # But the paths *should* be absolute (relative paths mess up in submakefiles).
 
 !IFNDEF GDAL_HOME
-GDAL_HOME = "C:\warmerda\bld"
+GDAL_HOME = "C:\MercatorNavionics"
 !ENDIF
 !IFNDEF BINDIR
 BINDIR = $(GDAL_HOME)\bin
@@ -538,13 +538,9 @@ GRIB_SETTING=yes
 # PROJ stuff
 # Uncomment the following lines to link PROJ library statically. Otherwise
 # it will be linked dynamically during runtime.
-# To use the new API of proj5 or later, use
-#PROJ_FLAGS = -DPROJ_STATIC -DPROJ_VERSION=5
-# for proj 4.x:
 #PROJ_FLAGS = -DPROJ_STATIC -DPROJ_VERSION=4
-
-#PROJ_INCLUDE = -Id:\projects\proj.4\src
-#PROJ_LIBRARY = d:\projects\proj.4\src\proj_i.lib
+PROJ_INCLUDE = -IC:\MercatorNavionics\include
+PROJ_LIBRARY = C:\MercatorNavionics\lib\proj_i.lib
 
 # Add ORACLE support.
 # Uncomment the following line to enable OCI Oracle Spatial support.

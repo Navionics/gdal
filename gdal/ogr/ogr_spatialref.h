@@ -531,6 +531,11 @@ class CPL_DLL OGRSpatialReference
     OGRErr      SetMercator( double dfCenterLat, double dfCenterLong,
                              double dfScale,
                              double dfFalseEasting, double dfFalseNorthing );
+    
+    /** Mercator Navionics */
+    OGRErr      SetMercatorNavionics( double dfCenterLat, double dfCenterLong,
+                             double dfScale,
+                             double dfFalseEasting, double dfFalseNorthing );
 
     /** Mercator 2SP */
     OGRErr      SetMercator2SP( double dfStdP1,
