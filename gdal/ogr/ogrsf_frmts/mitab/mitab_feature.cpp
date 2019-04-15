@@ -1092,7 +1092,7 @@ int TABPoint::WriteGeometryToMAPFile(TABMAPFile *poMapFile,
     m_nSymbolDefIndex = poMapFile->WriteSymbolDef(&m_sSymbolDef);
     poPointHdr->m_nSymbolId = static_cast<GByte>(m_nSymbolDefIndex);  // Symbol index
 
-    if (CPLGetLastErrorNo() != 0)
+    if (CPLGetLastErrorType() == CE_Failure)
         return -1;
 
     return 0;
@@ -1441,7 +1441,7 @@ int TABFontPoint::WriteGeometryToMAPFile(TABMAPFile *poMapFile,
     m_nFontDefIndex = poMapFile->WriteFontDef(&m_sFontDef);
     poPointHdr->m_nFontId = static_cast<GByte>(m_nFontDefIndex);  // Font name index
 
-    if (CPLGetLastErrorNo() != 0)
+    if (CPLGetLastErrorType() == CE_Failure)
         return -1;
 
     return 0;
@@ -1512,6 +1512,36 @@ void TABFontPoint::SetSymbolAngle(double dAngle)
 }
 
 /**********************************************************************
+ *                   TABFontPoint::GetSymbolStyleString()
+ *
+ *  Return a Symbol() string. All representations info for the Symbol are here.
+ **********************************************************************/
+const char* TABFontPoint::GetSymbolStyleString(double dfAngle) const
+{
+    /* Get the SymbolStyleString, and add the outline Color
+       (halo/border in MapInfo Symbol terminology) */
+    const char *outlineColor = nullptr;
+    if (m_nFontStyle & 16)
+        outlineColor = ",o:#000000";
+    else if (m_nFontStyle & 512)
+        outlineColor = ",o:#ffffff";
+    else
+        outlineColor = "";
+
+    int         nAngle = static_cast<int>(dfAngle);
+    const char* pszStyle;
+
+    pszStyle=CPLSPrintf("SYMBOL(a:%d,c:#%6.6x,s:%dpt,id:\"font-sym-%d,ogr-sym-9\"%s,f:\"%s\")",
+                        nAngle,
+                        m_sSymbolDef.rgbColor,
+                        m_sSymbolDef.nPointSize,
+                        m_sSymbolDef.nSymbolNo,
+                        outlineColor,
+                        GetFontNameRef());
+    return pszStyle;
+}
+
+/**********************************************************************
  *                   TABFontPoint::GetStyleString() const
  *
  * Return style string for this feature.
@@ -1522,27 +1552,31 @@ const char *TABFontPoint::GetStyleString() const
 {
     if (m_pszStyleString == nullptr)
     {
-        /* Get the SymbolStyleString, and add the outline Color
-           (halo/border in MapInfo Symbol terminology) */
-        char *pszSymbolStyleString =
-            CPLStrdup(GetSymbolStyleString(GetSymbolAngle()));
-        int nStyleStringlen = static_cast<int>(strlen(pszSymbolStyleString));
-        pszSymbolStyleString[nStyleStringlen - 1] = '\0';
-
-        const char *outlineColor = nullptr;
-        if (m_nFontStyle & 16)
-            outlineColor = ",o:#000000";
-        else if (m_nFontStyle & 512)
-            outlineColor = ",o:#ffffff";
-        else
-            outlineColor = "";
-
-        m_pszStyleString =
-            CPLStrdup(CPLSPrintf("%s%s)", pszSymbolStyleString, outlineColor));
-        CPLFree(pszSymbolStyleString);
+        m_pszStyleString = CPLStrdup(GetSymbolStyleString(GetSymbolAngle()));
     }
 
     return m_pszStyleString;
+}
+
+void TABFontPoint::SetSymbolFromStyle(OGRStyleSymbol* poSymbolStyle)
+{
+    ITABFeatureSymbol::SetSymbolFromStyle(poSymbolStyle);
+
+    GBool bIsNull = 0;
+
+    // Try to set font glyph number
+    const char* pszSymbolId = poSymbolStyle->Id(bIsNull);
+    if((!bIsNull) && pszSymbolId && STARTS_WITH(pszSymbolId, "font-sym-"))
+    {
+        const int nSymbolId = atoi(pszSymbolId+9);
+        SetSymbolNo(static_cast<GInt16>(nSymbolId));
+    }
+
+    const char* pszFontName = poSymbolStyle->FontName(bIsNull);
+    if((!bIsNull) && pszFontName)
+    {
+        SetFontName(pszFontName);
+    }
 }
 
 /*=====================================================================
@@ -1729,7 +1763,7 @@ int TABCustomPoint::WriteGeometryToMAPFile(TABMAPFile *poMapFile,
     m_nFontDefIndex = poMapFile->WriteFontDef(&m_sFontDef);
     poPointHdr->m_nFontId = static_cast<GByte>(m_nFontDefIndex);  // Font index
 
-    if (CPLGetLastErrorNo() != 0)
+    if (CPLGetLastErrorType() == CE_Failure)
         return -1;
 
     return 0;
@@ -3369,7 +3403,7 @@ int TABRegion::WriteGeometryToMAPFile(TABMAPFile *poMapFile,
         return -1;
     }
 
-    if (CPLGetLastErrorNo() != 0)
+    if (CPLGetLastErrorType() == CE_Failure)
         return -1;
 
     /* Return a ref to coord block so that caller can continue writing
@@ -4169,7 +4203,7 @@ int TABRectangle::WriteGeometryToMAPFile(TABMAPFile *poMapFile,
     m_nBrushDefIndex = poMapFile->WriteBrushDef(&m_sBrushDef);
     poRectHdr->m_nBrushId = static_cast<GByte>(m_nBrushDefIndex);      // Brush index
 
-    if (CPLGetLastErrorNo() != 0)
+    if (CPLGetLastErrorType() == CE_Failure)
         return -1;
 
     return 0;
@@ -4581,7 +4615,7 @@ int TABEllipse::WriteGeometryToMAPFile(TABMAPFile *poMapFile,
     m_nBrushDefIndex = poMapFile->WriteBrushDef(&m_sBrushDef);
     poRectHdr->m_nBrushId = static_cast<GByte>(m_nBrushDefIndex);      // Brush index
 
-    if (CPLGetLastErrorNo() != 0)
+    if (CPLGetLastErrorType() == CE_Failure)
         return -1;
 
     return 0;
@@ -5102,7 +5136,7 @@ int TABArc::WriteGeometryToMAPFile(TABMAPFile *poMapFile,
     m_nPenDefIndex = poMapFile->WritePenDef(&m_sPenDef);
     poArcHdr->m_nPenId = static_cast<GByte>(m_nPenDefIndex);      // Pen index
 
-    if (CPLGetLastErrorNo() != 0)
+    if (CPLGetLastErrorType() == CE_Failure)
         return -1;
 
     return 0;
@@ -5444,6 +5478,14 @@ int TABText::ReadGeometryFromMAPFile(TABMAPFile *poMapFile,
 
     pszTmpString[nStringLen] = '\0';
 
+    if(!poMapFile->GetEncoding().empty())
+    {
+        char *pszUtf8String =
+            CPLRecode(pszTmpString, poMapFile->GetEncoding(), CPL_ENC_UTF8);
+        CPLFree(pszTmpString);
+        pszTmpString = pszUtf8String;
+    }
+
     CPLFree(m_pszString);
     m_pszString = pszTmpString; // This string was Escaped before 20050714
 
@@ -5580,20 +5622,22 @@ int TABText::WriteGeometryToMAPFile(TABMAPFile *poMapFile,
     GInt32 nCoordBlockPtr = poCoordBlock->GetCurAddress();
 
     // This string was escaped before 20050714
-    char *pszTmpString = m_pszString;
+    CPLString oTmpString(m_pszString);
+    if(!poMapFile->GetEncoding().empty())
+    {
+        oTmpString.Recode(CPL_ENC_UTF8, poMapFile->GetEncoding());
+    }
 
-    int nStringLen = static_cast<int>(strlen(pszTmpString));
+    int nStringLen = static_cast<int>(oTmpString.length());
 
     if (nStringLen > 0)
     {
-        poCoordBlock->WriteBytes(nStringLen, reinterpret_cast<GByte *>(pszTmpString));
+        poCoordBlock->WriteBytes(nStringLen, reinterpret_cast<const GByte *>(oTmpString.c_str()));
     }
     else
     {
         nCoordBlockPtr = 0;
     }
-
-    pszTmpString = nullptr;
 
     /*-----------------------------------------------------------------
      * Copy object information
@@ -5667,7 +5711,7 @@ int TABText::WriteGeometryToMAPFile(TABMAPFile *poMapFile,
         poTextHdr->m_nPenId = static_cast<GByte>(m_nPenDefIndex);      // Pen index for line/arrow
     }
 
-    if (CPLGetLastErrorNo() != 0)
+    if (CPLGetLastErrorType() == CE_Failure)
         return -1;
 
     /* Return a ref to coord block so that caller can continue writing
@@ -6632,7 +6676,7 @@ int TABMultiPoint::WriteGeometryToMAPFile(TABMAPFile *poMapFile,
         poMPointHdr->m_nSymbolId = static_cast<GByte>(m_nSymbolDefIndex);      // Symbol index
     }
 
-    if (CPLGetLastErrorNo() != 0)
+    if (CPLGetLastErrorType() == CE_Failure)
         return -1;
 
     /* Return a ref to coord block so that caller can continue writing
@@ -7734,7 +7778,7 @@ int TABCollection::WriteGeometryToMAPFile(TABMAPFile *poMapFile,
 
     poCollHdr->SetMBR(m_nXMin, m_nYMin, m_nXMax, m_nYMax);
 
-    if (CPLGetLastErrorNo() != 0)
+    if (CPLGetLastErrorType() == CE_Failure)
         return -1;
 
     /* Return a ref to coord block so that caller can continue writing
@@ -8858,70 +8902,24 @@ const char *ITABFeatureSymbol::GetSymbolStyleString(double dfAngle) const
 /**********************************************************************
  *                   ITABFeatureSymbol::SetSymbolFromStyleString()
  *
- *  Set all Symbol var from a StyleString. Use StyleMgr to do so.
+ *  Set all Symbol var from a OGRStyleSymbol.
  **********************************************************************/
-void ITABFeatureSymbol::SetSymbolFromStyleString(const char *pszStyleString)
+void ITABFeatureSymbol::SetSymbolFromStyle(OGRStyleSymbol* poSymbolStyle)
 {
     GBool bIsNull = 0;
-
-    // Use the Style Manager to retrieve all the information we need.
-    OGRStyleMgr *poStyleMgr = new OGRStyleMgr(nullptr);
-    OGRStyleTool *poStylePart = nullptr;
-
-    // Init the StyleMgr with the StyleString.
-    poStyleMgr->InitStyleString(pszStyleString);
-
-    // Retrieve the Symbol info.
-    const int numParts = poStyleMgr->GetPartCount();
-    for( int i = 0; i < numParts; i++ )
-    {
-        poStylePart = poStyleMgr->GetPart(i);
-        if( poStylePart == nullptr )
-            continue;
-
-        if(poStylePart->GetType() == OGRSTCSymbol)
-        {
-            break;
-        }
-        else
-        {
-            delete poStylePart;
-            poStylePart = nullptr;
-        }
-    }
-
-    // If the no Symbol found, do nothing.
-    if(poStylePart == nullptr)
-    {
-        delete poStyleMgr;
-        return;
-    }
-
-    OGRStyleSymbol *poSymbolStyle = cpl::down_cast<OGRStyleSymbol*>(poStylePart);
-
-    // With Symbol, we always want to output points
-    //
-    // It's very important to set the output unit of the feature.
-    // The default value is meter. If we don't do it all numerical values
-    // will be assumed to be converted from the input unit to meter when we
-    // will get them via GetParam...() functions.
-    // See OGRStyleTool::Parse() for more details.
-    poSymbolStyle->SetUnit(OGRSTUPoints, (72.0 * 39.37));
 
     // Set the Symbol Id (SymbolNo)
     const char *pszSymbolId = poSymbolStyle->Id(bIsNull);
     if(bIsNull) pszSymbolId = nullptr;
 
-    if(pszSymbolId &&
-       (strstr(pszSymbolId, "mapinfo-sym-") ||
-        strstr(pszSymbolId, "ogr-sym-")) )
+    if(pszSymbolId)
     {
-        if(strstr(pszSymbolId, "mapinfo-sym-"))
+        if(STARTS_WITH(pszSymbolId, "mapinfo-sym-"))
         {
             const int nSymbolId = atoi(pszSymbolId+12);
             SetSymbolNo(static_cast<GByte>(nSymbolId));
         }
-        else if(strstr(pszSymbolId, "ogr-sym-"))
+        else if(STARTS_WITH(pszSymbolId, "ogr-sym-"))
         {
             const int nSymbolId = atoi(pszSymbolId+8);
 
@@ -8982,6 +8980,60 @@ void ITABFeatureSymbol::SetSymbolFromStyleString(const char *pszStyleString)
         int nSymbolColor = static_cast<int>(strtol(pszSymbolColor, nullptr, 16));
         SetSymbolColor(static_cast<GInt32>(nSymbolColor));
     }
+}
+
+/**********************************************************************
+ *                   ITABFeatureSymbol::SetSymbolFromStyleString()
+ *
+ *  Set all Symbol var from a StyleString. Use StyleMgr to do so.
+ **********************************************************************/
+void ITABFeatureSymbol::SetSymbolFromStyleString(const char *pszStyleString)
+{
+    // Use the Style Manager to retrieve all the information we need.
+    OGRStyleMgr *poStyleMgr = new OGRStyleMgr(nullptr);
+    OGRStyleTool *poStylePart = nullptr;
+
+    // Init the StyleMgr with the StyleString.
+    poStyleMgr->InitStyleString(pszStyleString);
+
+    // Retrieve the Symbol info.
+    const int numParts = poStyleMgr->GetPartCount();
+    for( int i = 0; i < numParts; i++ )
+    {
+        poStylePart = poStyleMgr->GetPart(i);
+        if( poStylePart == nullptr )
+            continue;
+
+        if(poStylePart->GetType() == OGRSTCSymbol)
+        {
+            break;
+        }
+        else
+        {
+            delete poStylePart;
+            poStylePart = nullptr;
+        }
+    }
+
+    // If the no Symbol found, do nothing.
+    if(poStylePart == nullptr)
+    {
+        delete poStyleMgr;
+        return;
+    }
+
+    OGRStyleSymbol *poSymbolStyle = cpl::down_cast<OGRStyleSymbol*>(poStylePart);
+
+    // With Symbol, we always want to output points
+    //
+    // It's very important to set the output unit of the feature.
+    // The default value is meter. If we don't do it all numerical values
+    // will be assumed to be converted from the input unit to meter when we
+    // will get them via GetParam...() functions.
+    // See OGRStyleTool::Parse() for more details.
+    poSymbolStyle->SetUnit(OGRSTUPoints, (72.0 * 39.37));
+
+    SetSymbolFromStyle(poSymbolStyle);
 
     delete poStyleMgr;
     delete poStylePart;

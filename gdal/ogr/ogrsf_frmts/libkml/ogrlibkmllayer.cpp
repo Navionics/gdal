@@ -122,7 +122,6 @@ OGRLIBKMLLayer::OGRLIBKMLLayer( const char *pszLayerName,
                                 int bNew,
                                 int bUpdateIn ) :
     bUpdate(CPL_TO_BOOL(bUpdateIn)),
-    bUpdated(false),
     nFeatures(0),
     iFeature(0),
     nFID(1),
@@ -153,6 +152,7 @@ OGRLIBKMLLayer::OGRLIBKMLLayer( const char *pszLayerName,
 {
     m_poStyleTable = nullptr;
     m_poOgrSRS->SetWellKnownGeogCS( "WGS84" );
+    m_poOgrSRS->SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
 
     SetDescription( m_poOgrFeatureDefn->GetName() );
     m_poOgrFeatureDefn->Reference();
@@ -366,12 +366,6 @@ OGRLIBKMLLayer::OGRLIBKMLLayer( const char *pszLayerName,
             iFeature = 0;
         }
     }
-    /***** it was from a DS::CreateLayer *****/
-    else
-    {
-        /***** mark the layer as updated *****/
-        bUpdated = true;
-    }
 }
 
 /******************************************************************************
@@ -568,8 +562,7 @@ OGRErr OGRLIBKMLLayer::ICreateFeature( OGRFeature * poOgrFeat )
         }
     }
 
-    /***** mark the layer as updated *****/
-    bUpdated = true;
+    /***** mark as updated *****/
     m_poOgrDS->Updated();
 
     return OGRERR_NONE;
@@ -607,8 +600,7 @@ OGRErr OGRLIBKMLLayer::ISetFeature( OGRFeature * poOgrFeat )
                     OGRLIBKMLGetSanitizedNCName(GetName()).c_str(), poOgrFeat->GetFID());
     poKmlFeature->set_targetid(pszId);
 
-    /***** mark the layer as updated *****/
-    bUpdated = true;
+    /***** mark as updated *****/
     m_poOgrDS->Updated();
 
     return OGRERR_NONE;
@@ -641,8 +633,7 @@ OGRErr OGRLIBKMLLayer::DeleteFeature( GIntBig nFIDIn )
                     OGRLIBKMLGetSanitizedNCName(GetName()).c_str(), nFIDIn);
     poKmlPlacemark->set_targetid(pszId);
 
-    /***** mark the layer as updated *****/
-    bUpdated = true;
+    /***** mark as updated *****/
     m_poOgrDS->Updated();
 
     return OGRERR_NONE;
@@ -773,8 +764,7 @@ OGRErr OGRLIBKMLLayer::CreateField(
 
     m_poOgrFeatureDefn->AddFieldDefn( poField );
 
-    /***** mark the layer as updated *****/
-    bUpdated = true;
+    /***** mark as updated *****/
     m_poOgrDS->Updated();
 
     return OGRERR_NONE;
@@ -791,6 +781,7 @@ OGRErr OGRLIBKMLLayer::CreateField(
 
 OGRErr OGRLIBKMLLayer::SyncToDisk()
 {
+    m_poOgrDS->FlushCache();
     return OGRERR_NONE;
 }
 
@@ -848,8 +839,7 @@ void OGRLIBKMLLayer::SetStyleTableDirectly( OGRStyleTable * poStyleTable )
                         AsContainer( poKmlDocument ) );
     }
 
-    /***** mark the layer as updated *****/
-    bUpdated = true;
+    /***** mark as updated *****/
     m_poOgrDS->Updated();
 }
 
@@ -894,7 +884,7 @@ int OGRLIBKMLLayer::TestCapability( const char *pszCap )
     else if( EQUAL( pszCap, OLCSequentialWrite ) )
         result = bUpdate;
     else if( EQUAL( pszCap, OLCRandomWrite ) )
-        result = FALSE;
+        result = bUpdate;
     else if( EQUAL( pszCap, OLCFastFeatureCount ) )
         result = FALSE;
     else if( EQUAL( pszCap, OLCFastSetNextByIndex ) )
@@ -902,7 +892,7 @@ int OGRLIBKMLLayer::TestCapability( const char *pszCap )
     else if( EQUAL( pszCap, OLCCreateField ) )
         result = bUpdate;
     else if( EQUAL( pszCap, OLCDeleteFeature ) )
-        result = FALSE;
+        result = bUpdate && m_poKmlUpdate;
     else if( EQUAL( pszCap, OLCStringsAsUTF8 ) )
         result = TRUE;
 

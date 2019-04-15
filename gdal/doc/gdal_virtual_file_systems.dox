@@ -59,20 +59,20 @@ gdalinfo /vsizip/my.zip/my.tif
 
 It is possible to chain multiple file system handlers.
 
-ogrinfo a shapefile in a zip file on the internet: 
+ogrinfo a shapefile in a zip file on the internet:
 <pre>
 ogrinfo -ro -al -so /vsizip//vsicurl/https://raw.githubusercontent.com/OSGeo/gdal/master/autotest/ogr/data/poly.zip
 </pre>
 
 ogrinfo a shapefile in a zip file on an ftp:
 <pre>
-ogrinfo -ro -al -so /vsizip//vsicurl/ftp://user:password@example.com/foldername/file.zip/example.shp 
+ogrinfo -ro -al -so /vsizip//vsicurl/ftp://user:password@example.com/foldername/file.zip/example.shp
 </pre>
 
 \section gdal_virtual_file_systems_drivers Drivers supporting virtual file systems
 
 Virtual file systems can only be used with GDAL or OGR drivers supporting the
-"large file API", which is now the vast majority of file based drivers. The 
+"large file API", which is now the vast majority of file based drivers. The
 full list of these formats can be obtained by looking at the driver marked with
 'v' when running either gdalinfo --formats or ogrinfo --formats.
 
@@ -374,7 +374,8 @@ now).
 entire file. It requires GDAL to be built against libcurl.
 
 It also allows sequential writing of files (no seeks or read operations are
-then allowed). Deletion of files with VSIUnlink() is also supported.
+then allowed, so in particular direct writing of GeoTIFF files with the GTiff
+driver is not supported). Deletion of files with VSIUnlink() is also supported.
 Starting with GDAL 2.3, creation of directories with VSIMkdir() and deletion
 of (empty) directories with VSIRmdir() are also possible.
 
@@ -418,7 +419,14 @@ facilitate use with
 <a href="http://docs.aws.amazon.com/AmazonS3/latest/dev/RequesterPaysBuckets.html">Requester
 Pays buckets</a>.
 
-The AWS_S3_ENDPOINT configuration option defaults to s3.amazonaws.com. 
+The AWS_S3_ENDPOINT configuration option defaults to s3.amazonaws.com.
+
+The AWS_VIRTUAL_HOSTING configuration option defaults to TRUE.
+This allows you to configure the two ways to access the buckets, see <a href="http://docs.ceph.com/docs/luminous/radosgw/s3/commons/#bucket-and-host-name">Bucket and Host Name</a> for more details.
+<ul>
+<li>TRUE value, identifies the bucket via a virtual bucket host name, e.g.: mybucket.cname.domain.com</li>
+<li>FALSE value, identifies the bucket as the top-level directory in the URI, e.g.: cname.domain.com/mybucket</li>
+</ul>
 
 On writing, the file is uploaded using the S3
 <a href="http://docs.aws.amazon.com/AmazonS3/latest/API/mpUploadInitiate.html">multipart upload API</a>.
@@ -431,6 +439,10 @@ storage. You'll have to abort yourself with other means such "ghost" uploads
 (e.g. with the <a href="http://s3tools.org/s3cmd">s3cmd</a> utility) For
 files smaller than the chunk size, a simple PUT request is used instead of
 the multipart upload API.
+
+Since GDAL 2.4, when listing a directory, files with GLACIER storage class are
+ignored unless the CPL_VSIL_CURL_IGNORE_GLACIER_STORAGE configuration option
+is set to NO.
 
 @since GDAL 2.1
 
@@ -458,7 +470,8 @@ without prior download of the
 entire file. It requires GDAL to be built against libcurl.
 
 Starting with GDAL 2.3, it also allows sequential writing of files (no seeks
-or read operations are then allowed). Deletion of files with VSIUnlink(),
+or read operations are then allowed, so in particular direct writing of GeoTIFF files with the GTiff
+driver is not supported). Deletion of files with VSIUnlink(),
 creation of directories with VSIMkdir() and deletion of (empty) directories with
 VSIRmdir() are also possible.
 
@@ -551,7 +564,8 @@ without prior download of the entire file.
 It requires GDAL to be built against libcurl.
 
 It also allows sequential writing of files (no seeks
-or read operations are then allowed). A block blob will be created if the
+or read operations are then allowed, so in particular direct writing of GeoTIFF files with the GTiff
+driver is not supported). A block blob will be created if the
 file size is below 4 MB. Beyond, an append blob will be created (with a
 maximum file size of 195 GB).
 
@@ -610,7 +624,8 @@ Authentication options, and read-only features, are identical to
 It requires GDAL to be built against libcurl.
 
 It also allows sequential writing of files (no seeks or read operations are
-then allowed). Deletion of files with VSIUnlink() is also supported.
+then allowed, so in particular direct writing of GeoTIFF files with the GTiff
+driver is not supported). Deletion of files with VSIUnlink() is also supported.
 Creation of directories with VSIMkdir() and deletion
 of (empty) directories with VSIRmdir() are also possible.
 
@@ -665,7 +680,8 @@ Authentication options, and read-only features, are identical to
 It requires GDAL to be built against libcurl.
 
 It also allows sequential writing of files (no seeks or read operations are
-then allowed). Deletion of files with VSIUnlink() is also supported.
+then allowed, so in particular direct writing of GeoTIFF files with the GTiff
+driver is not supported). Deletion of files with VSIUnlink() is also supported.
 Creation of directories with VSIMkdir() and deletion
 of (empty) directories with VSIRmdir() are also possible.
 
@@ -747,7 +763,8 @@ Examples:
 </pre>
 
 It also allows sequential writing of files (no seeks or read operations are
-then allowed). Deletion of files with VSIUnlink() is also supported.
+then allowed, so in particular direct writing of GeoTIFF files with the GTiff
+driver is not supported). Deletion of files with VSIUnlink() is also supported.
 Creation of directories with VSIMkdir() and deletion
 of (empty) directories with VSIRmdir() are also possible.
 

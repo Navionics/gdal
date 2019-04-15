@@ -399,6 +399,10 @@ void CPL_STDCALL GDALAllRegister()
     GDALRegister_mrf();
 #endif
 
+#ifdef FRMT_tiledb
+    GDALRegister_TileDB();
+#endif
+
 /* -------------------------------------------------------------------- */
 /*      Put raw formats at the end of the list. These drivers support   */
 /*      various ASCII-header labeled formats, so the driver could be    */
@@ -426,6 +430,7 @@ void CPL_STDCALL GDALAllRegister()
     GDALRegister_LCP();
     GDALRegister_GTX();
     GDALRegister_LOSLAS();
+    GDALRegister_NTv1();
     GDALRegister_NTv2();
     GDALRegister_CTable2();
     GDALRegister_ACE2();
@@ -433,6 +438,7 @@ void CPL_STDCALL GDALAllRegister()
     GDALRegister_KRO();
     GDALRegister_ROIPAC();
     GDALRegister_RRASTER();
+    GDALRegister_BYN();
 #endif
 
 #ifdef FRMT_arg
@@ -558,24 +564,41 @@ void CPL_STDCALL GDALAllRegister()
     GDALRegister_NULL();
 #endif
 
+#ifdef FRMT_sigdem
+    GDALRegister_SIGDEM();
+#endif
+
+#ifdef FRMT_ignfheightasciigrid
+    GDALRegister_IGNFHeightASCIIGrid();
+#endif
+
+    // NOTE: you need to generally your own driver before that line.
+
+/* -------------------------------------------------------------------- */
+/*     GNM and OGR drivers                                              */
+/* -------------------------------------------------------------------- */
 #ifdef GNM_ENABLED
     GNMRegisterAllInternal();
 #endif
 
     OGRRegisterAllInternal();
 
+/* -------------------------------------------------------------------- */
+/*      Put here drivers that absolutely need to look for side car      */
+/*      files in their Identify()/Open() procedure.                     */
+/* -------------------------------------------------------------------- */
+
 #ifdef FRMT_raw
-    // Those ones need to look for side car files so put them at end
     GDALRegister_GenBin();
     GDALRegister_ENVI();
     GDALRegister_EHdr();
     GDALRegister_ISCE();
 #endif
 
-#ifdef FRMT_sigdem
-    GDALRegister_SIGDEM();
-#endif
-
+/* -------------------------------------------------------------------- */
+/*      Register GDAL HTTP last, to let a chance to other drivers       */
+/*      accepting URL to handle them before.                            */
+/* -------------------------------------------------------------------- */
 #ifdef FRMT_wcs
     GDALRegister_HTTP();
 #endif

@@ -520,7 +520,6 @@ bool OGRVRTLayer::FullInitialize()
 
     const char *pszSharedSetting = nullptr;
     const char *pszSQL = nullptr;
-    const char *pszSrcFIDFieldName = nullptr;
     const char *pszStyleFieldName = nullptr;
     CPLXMLNode *psChild = nullptr;
     bool bFoundGeometryField = false;
@@ -814,27 +813,35 @@ try_again:
         poFeatureDefn->AddGeomFieldDefn(&oFieldDefn);
     }
 
-    // Figure out what should be used as an FID.
     bAttrFilterPassThrough = true;
-    pszSrcFIDFieldName = CPLGetXMLValue(psLTree, "FID", nullptr);
 
-    if( pszSrcFIDFieldName != nullptr )
+    // Figure out what should be used as an FID.
     {
-        iFIDField = GetSrcLayerDefn()->GetFieldIndex(pszSrcFIDFieldName);
-        if( iFIDField == -1 )
+        CPLXMLNode* psFIDNode = CPLGetXMLNode(psLTree, "FID");
+        if( psFIDNode != nullptr )
         {
-            CPLError(CE_Failure, CPLE_AppDefined,
-                     "Unable to identify FID field '%s'.", pszSrcFIDFieldName);
-            goto error;
+            const char* pszSrcFIDFieldName = CPLGetXMLValue(psFIDNode, nullptr, "");
+            if( !EQUAL(pszSrcFIDFieldName, "") )
+            {
+                iFIDField = GetSrcLayerDefn()->GetFieldIndex(pszSrcFIDFieldName);
+                if( iFIDField == -1 )
+                {
+                    CPLError(CE_Failure, CPLE_AppDefined,
+                            "Unable to identify FID field '%s'.", pszSrcFIDFieldName);
+                    goto error;
+                }
+            }
+
+            // User facing FID column name.
+            osFIDFieldName = CPLGetXMLValue(psFIDNode, "name", pszSrcFIDFieldName);
+            if( !EQUAL(osFIDFieldName,poSrcLayer->GetFIDColumn()) )
+            {
+                bAttrFilterPassThrough = false;
+            }
         }
-
-        // User facing FID column name. If not defined we will report the
-        // source FID column name only if it is exposed as a field too (#4637).
-        osFIDFieldName = CPLGetXMLValue(psLTree, "FID.name", "");
-
-        if( !EQUAL(pszSrcFIDFieldName, poSrcLayer->GetFIDColumn()) )
+        else
         {
-            bAttrFilterPassThrough = false;
+            osFIDFieldName = poSrcLayer->GetFIDColumn();
         }
     }
 
@@ -1401,13 +1408,13 @@ void OGRVRTLayer::ClipAndAssignSRS(OGRFeature *poFeature)
             poGeom != nullptr )
         {
             poGeom = poGeom->Intersection(apoGeomFieldProps[i]->poSrcRegion);
-            if( poGeom != nullptr && apoGeomFieldProps[i]->poSRS != nullptr )
-                poGeom->assignSpatialReference(apoGeomFieldProps[i]->poSRS);
+            if( poGeom != nullptr )
+                poGeom->assignSpatialReference(GetLayerDefn()->GetGeomFieldDefn(i)->GetSpatialRef());
 
             poFeature->SetGeomFieldDirectly(i, poGeom);
         }
-        else if( poGeom != nullptr && apoGeomFieldProps[i]->poSRS != nullptr )
-            poGeom->assignSpatialReference(apoGeomFieldProps[i]->poSRS);
+        else if( poGeom != nullptr )
+            poGeom->assignSpatialReference(GetLayerDefn()->GetGeomFieldDefn(i)->GetSpatialRef());
     }
 }
 
@@ -1830,8 +1837,8 @@ OGRVRTLayer::TranslateVRTFeatureToSrcFeature(OGRFeature *poVRTFeature)
         }
 
         OGRGeometry *poGeom = poSrcFeat->GetGeomFieldRef(i);
-        if( poGeom != nullptr && apoGeomFieldProps[i]->poSRS != nullptr )
-            poGeom->assignSpatialReference(apoGeomFieldProps[i]->poSRS);
+        if( poGeom != nullptr )
+            poGeom->assignSpatialReference(GetLayerDefn()->GetGeomFieldDefn(i)->GetSpatialRef());
     }
 
     // Copy fields.
@@ -2093,29 +2100,6 @@ int OGRVRTLayer::TestCapability( const char *pszCap )
 }
 
 /************************************************************************/
-/*                           GetSpatialRef()                            */
-/************************************************************************/
-
-OGRSpatialReference *OGRVRTLayer::GetSpatialRef()
-
-{
-    if( (CPLGetXMLValue(psLTree, "LayerSRS", nullptr) != nullptr ||
-         CPLGetXMLValue(psLTree, "GeometryField.SRS", nullptr) != nullptr) &&
-        !apoGeomFieldProps.empty() )
-        return apoGeomFieldProps[0]->poSRS;
-
-    if( !bHasFullInitialized )
-        FullInitialize();
-    if( !poSrcLayer || poDS->GetRecursionDetected() )
-        return nullptr;
-
-    if( apoGeomFieldProps.size() >= 1 )
-        return apoGeomFieldProps[0]->poSRS;
-    else
-        return nullptr;
-}
-
-/************************************************************************/
 /*                              GetExtent()                             */
 /************************************************************************/
 
@@ -2283,30 +2267,7 @@ const char *OGRVRTLayer::GetFIDColumn()
     if( !poSrcLayer || poDS->GetRecursionDetected() )
         return "";
 
-    if( !osFIDFieldName.empty() )
-        return osFIDFieldName;
-
-    const char *pszFIDColumn = nullptr;
-    if( iFIDField == -1 )
-    {
-        // If pass-through, then query the source layer FID column.
-        pszFIDColumn = poSrcLayer->GetFIDColumn();
-        if( pszFIDColumn == nullptr || EQUAL(pszFIDColumn, "") )
-            return "";
-    }
-    else
-    {
-        // Otherwise get the name from the index in the source layer definition.
-        OGRFieldDefn *poFDefn = GetSrcLayerDefn()->GetFieldDefn(iFIDField);
-        pszFIDColumn = poFDefn->GetNameRef();
-    }
-
-    // Check that the FIDColumn is actually reported in the VRT layer
-    // definition.
-    if( GetLayerDefn()->GetFieldIndex(pszFIDColumn) != -1 )
-        return pszFIDColumn;
-    else
-        return "";
+    return osFIDFieldName;
 }
 
 /************************************************************************/

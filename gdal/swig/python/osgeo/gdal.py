@@ -107,8 +107,8 @@ def deprecation_warn(module):
        DeprecationWarning)
 
 
-from gdalconst import *
-import gdalconst
+from osgeo.gdalconst import *
+from osgeo import gdalconst
 
 
 import sys
@@ -156,6 +156,23 @@ def RGBFile2PCTFile( src_filename, dst_filename ):
 
   return 0
 
+def listdir(path, recursionLevel = -1, options = []):
+  """ Iterate over a directory.
+
+      recursionLevel = -1 means unlimited level of recursion.
+  """
+  dir = OpenDir(path, recursionLevel, options)
+  if not dir:
+      raise OSError(path + ' does not exist')
+  try:
+      while True:
+          entry = GetNextDirEntry(dir)
+          if not entry:
+              break
+          yield entry
+  finally:
+      CloseDir(dir)
+
 
 def GetUseExceptions(*args):
     """GetUseExceptions() -> int"""
@@ -186,7 +203,7 @@ def InfoOptions(options=None, format='text', deserialize=True,
          stats=False, approxStats=False, computeChecksum=False,
          showGCPs=True, showMetadata=True, showRAT=True, showColorTable=True,
          listMDD=False, showFileList=True, allMetadata=False,
-         extraMDDomains=None):
+         extraMDDomains=None, wktFormat=None):
     """ Create a InfoOptions() object that can be passed to gdal.Info()
         options can be be an array of strings, a string or let empty and filled from other keywords."""
 
@@ -227,6 +244,8 @@ def InfoOptions(options=None, format='text', deserialize=True,
             new_options += ['-nofl']
         if allMetadata:
             new_options += ['-mdd', 'all']
+        if wktFormat:
+            new_options += ['-wkt_format', wktFormat]
         if extraMDDomains is not None:
             for mdd in extraMDDomains:
                 new_options += ['-mdd', mdd]
@@ -405,6 +424,7 @@ def WarpOptions(options=None, format=None,
          xRes=None, yRes=None, targetAlignedPixels = False,
          width = 0, height = 0,
          srcSRS=None, dstSRS=None,
+         coordinateOperation=None,
          srcAlpha = False, dstAlpha = False,
          warpOptions=None, errorThreshold=None,
          warpMemoryLimit=None, creationOptions=None, outputType = gdalconst.GDT_Unknown,
@@ -415,6 +435,7 @@ def WarpOptions(options=None, format=None,
          cutlineLayer=None, cutlineWhere=None, cutlineSQL=None, cutlineBlend=None, cropToCutline = False,
          copyMetadata = True, metadataConflictValue=None,
          setColorInterpretation = False,
+         overviewLevel = 'AUTO',
          callback=None, callback_data=None):
     """ Create a WarpOptions() object that can be passed to gdal.Warp()
         Keyword arguments are :
@@ -428,6 +449,7 @@ def WarpOptions(options=None, format=None,
           height --- height of the output raster in pixel
           srcSRS --- source SRS
           dstSRS --- output SRS
+          coordinateOperation -- coordinate operation as a PROJ string or WKT string
           srcAlpha --- whether to force the last band of the input dataset to be considered as an alpha band
           dstAlpha --- whether to force the creation of an output alpha band
           outputType --- output type (gdalconst.GDT_Byte, etc...)
@@ -454,6 +476,7 @@ def WarpOptions(options=None, format=None,
           copyMetadata --- whether to copy source metadata
           metadataConflictValue --- metadata data conflict value
           setColorInterpretation --- whether to force color interpretation of input bands to output bands
+          overviewLevel --- To specify which overview level of source files must be used
           callback --- callback method
           callback_data --- user data for callback
     """
@@ -481,6 +504,8 @@ def WarpOptions(options=None, format=None,
             new_options += ['-s_srs', str(srcSRS)]
         if dstSRS is not None:
             new_options += ['-t_srs', str(dstSRS)]
+        if coordinateOperation is not None:
+            new_options += ['-ct', coordinateOperation]
         if targetAlignedPixels:
             new_options += ['-tap']
         if srcAlpha:
@@ -552,6 +577,19 @@ def WarpOptions(options=None, format=None,
         if setColorInterpretation:
             new_options += ['-setci']
 
+        if overviewLevel is None or _is_str_or_unicode(overviewLevel):
+            pass
+        elif isinstance(overviewLevel, int):
+            if overviewLevel < 0:
+                overviewLevel = 'AUTO' + str(overviewLevel)
+            else:
+                overviewLevel = str(overviewLevel)
+        else:
+            overviewLevel = None
+
+        if overviewLevel:
+            new_options += ['-ovr', overviewLevel]
+
     return (GDALWarpAppOptions(new_options), callback, callback_data)
 
 def Warp(destNameOrDestDS, srcDSOrSrcDSTab, **kwargs):
@@ -589,6 +627,7 @@ def Warp(destNameOrDestDS, srcDSOrSrcDSTab, **kwargs):
 def VectorTranslateOptions(options=None, format=None,
          accessMode=None,
          srcSRS=None, dstSRS=None, reproject=True,
+         coordinateOperation=None,
          SQLStatement=None, SQLDialect=None, where=None, selectFields=None,
          addFields=False,
          forceNullable=False,
@@ -611,6 +650,7 @@ def VectorTranslateOptions(options=None, format=None,
           accessMode --- None for creation, 'update', 'append', 'overwrite'
           srcSRS --- source SRS
           dstSRS --- output SRS (with reprojection if reproject = True)
+          coordinateOperation -- coordinate operation as a PROJ string or WKT string
           reproject --- whether to do reprojection
           SQLStatement --- SQL statement to apply to the source dataset
           SQLDialect --- SQL dialect ('OGRSQL', 'SQLITE', ...)
@@ -648,6 +688,8 @@ def VectorTranslateOptions(options=None, format=None,
                 new_options += ['-t_srs', str(dstSRS)]
             else:
                 new_options += ['-a_srs', str(dstSRS)]
+        if coordinateOperation is not None:
+            new_options += ['-ct', coordinateOperation]
         if SQLStatement is not None:
             new_options += ['-sql', str(SQLStatement)]
         if SQLDialect is not None:
@@ -734,7 +776,7 @@ def VectorTranslate(destNameOrDestDS, srcDS, **kwargs):
 def DEMProcessingOptions(options=None, colorFilename=None, format=None,
               creationOptions=None, computeEdges=False, alg='Horn', band=1,
               zFactor=None, scale=None, azimuth=None, altitude=None,
-              combined=False, multiDirectional=False,
+              combined=False, multiDirectional=False, igor=False,
               slopeFormat=None, trigonometric=False, zeroForFlat=False,
               addAlpha=None,
               callback=None, callback_data=None):
@@ -751,8 +793,9 @@ def DEMProcessingOptions(options=None, colorFilename=None, format=None,
           scale --- ratio of vertical units to horizontal.
           azimuth --- (hillshade only) azimuth of the light, in degrees. 0 if it comes from the top of the raster, 90 from the east, ... The default value, 315, should rarely be changed as it is the value generally used to generate shaded maps.
           altitude ---(hillshade only) altitude of the light, in degrees. 90 if the light comes from above the DEM, 0 if it is raking light.
-          combined --- (hillshade only) whether to compute combined shading, a combination of slope and oblique shading.
-          multiDirectional --- (hillshade only) whether to compute multi-directional shading
+          combined --- (hillshade only) whether to compute combined shading, a combination of slope and oblique shading. Only one of combined, multiDirectional and igor can be specified.
+          multiDirectional --- (hillshade only) whether to compute multi-directional shading. Only one of combined, multiDirectional and igor can be specified.
+          igor --- (hillshade only) whether to use Igor's hillshading from Maperitive.  Only one of combined, multiDirectional and igor can be specified.
           slopeformat --- (slope only) "degree" or "percent".
           trigonometric --- (aspect only) whether to return trigonometric angle instead of azimuth. Thus 0deg means East, 90deg North, 180deg West, 270deg South.
           zeroForFlat --- (aspect only) whether to return 0 for flat areas with slope=0, instead of -9999.
@@ -788,6 +831,8 @@ def DEMProcessingOptions(options=None, colorFilename=None, format=None,
             new_options += ['-combined']
         if multiDirectional:
             new_options += ['-multidirectional']
+        if igor:
+            new_options += ['-igor']
         if slopeFormat == 'percent':
             new_options += ['-p']
         if trigonometric:
@@ -1247,13 +1292,50 @@ def BuildVRT(destName, srcDSOrSrcDSTab, **kwargs):
         return BuildVRTInternalNames(destName, srcDSNamesTab, opts, callback, callback_data)
 
 
+# Logging Helpers
+def _pylog_handler(err_level, err_no, err_msg):
+    if err_no != gdalconst.CPLE_None:
+        typ = _pylog_handler.errcode_map.get(err_no, str(err_no))
+        message = "%s: %s" % (typ, err_msg)
+    else:
+        message = err_msg
+
+    level = _pylog_handler.level_map.get(err_level, 20)  # default level is INFO
+    _pylog_handler.logger.log(level, message)
+
+def ConfigurePythonLogging(logger_name='gdal', enable_debug=False):
+    """ Configure GDAL to use Python's logging framework """
+    import logging
+
+    _pylog_handler.logger = logging.getLogger(logger_name)
+
+# map CPLE_* constants to names
+    _pylog_handler.errcode_map = {_num: _name[5:] for _name, _num in gdalconst.__dict__.items() if _name.startswith('CPLE_')}
+
+# Map GDAL log levels to Python's
+    _pylog_handler.level_map = {
+        CE_None: logging.INFO,
+        CE_Debug: logging.DEBUG,
+        CE_Warning: logging.WARN,
+        CE_Failure: logging.ERROR,
+        CE_Fatal: logging.CRITICAL,
+    }
+
+# Set CPL_DEBUG so debug messages are passed through the logger
+    if enable_debug:
+        SetConfigOption("CPL_DEBUG", "ON")
+
+# Install as the default GDAL log handler
+    SetErrorHandler(_pylog_handler)
+
+
 
 def Debug(*args):
     """Debug(char const * msg_class, char const * message)"""
     return _gdal.Debug(*args)
 
 def SetErrorHandler(*args):
-    """SetErrorHandler(char const * pszCallbackName=None) -> CPLErr"""
+    """SetErrorHandler(CPLErrorHandler pfnErrorHandler=0) -> CPLErr"""
     return _gdal.SetErrorHandler(*args)
 
 def PushErrorHandler(*args):
@@ -1312,6 +1394,10 @@ def VSIGetLastErrorMsg(*args):
     """VSIGetLastErrorMsg() -> char const *"""
     return _gdal.VSIGetLastErrorMsg(*args)
 
+def VSIErrorReset(*args):
+    """VSIErrorReset()"""
+    return _gdal.VSIErrorReset(*args)
+
 def PushFinderLocation(*args):
     """PushFinderLocation(char const * utf8_path)"""
     return _gdal.PushFinderLocation(*args)
@@ -1335,6 +1421,68 @@ def ReadDir(*args):
 def ReadDirRecursive(*args):
     """ReadDirRecursive(char const * utf8_path) -> char **"""
     return _gdal.ReadDirRecursive(*args)
+
+def OpenDir(*args):
+    """OpenDir(char const * utf8_path, int nRecurseDepth=-1, char ** options=None) -> VSIDIR *"""
+    return _gdal.OpenDir(*args)
+class DirEntry(_object):
+    """Proxy of C++ DirEntry class."""
+
+    __swig_setmethods__ = {}
+    __setattr__ = lambda self, name, value: _swig_setattr(self, DirEntry, name, value)
+    __swig_getmethods__ = {}
+    __getattr__ = lambda self, name: _swig_getattr(self, DirEntry, name)
+    __repr__ = _swig_repr
+    __swig_getmethods__["name"] = _gdal.DirEntry_name_get
+    if _newclass:
+        name = _swig_property(_gdal.DirEntry_name_get)
+    __swig_getmethods__["mode"] = _gdal.DirEntry_mode_get
+    if _newclass:
+        mode = _swig_property(_gdal.DirEntry_mode_get)
+    __swig_getmethods__["size"] = _gdal.DirEntry_size_get
+    if _newclass:
+        size = _swig_property(_gdal.DirEntry_size_get)
+    __swig_getmethods__["mtime"] = _gdal.DirEntry_mtime_get
+    if _newclass:
+        mtime = _swig_property(_gdal.DirEntry_mtime_get)
+    __swig_getmethods__["modeKnown"] = _gdal.DirEntry_modeKnown_get
+    if _newclass:
+        modeKnown = _swig_property(_gdal.DirEntry_modeKnown_get)
+    __swig_getmethods__["sizeKnown"] = _gdal.DirEntry_sizeKnown_get
+    if _newclass:
+        sizeKnown = _swig_property(_gdal.DirEntry_sizeKnown_get)
+    __swig_getmethods__["mtimeKnown"] = _gdal.DirEntry_mtimeKnown_get
+    if _newclass:
+        mtimeKnown = _swig_property(_gdal.DirEntry_mtimeKnown_get)
+    __swig_getmethods__["extra"] = _gdal.DirEntry_extra_get
+    if _newclass:
+        extra = _swig_property(_gdal.DirEntry_extra_get)
+
+    def __init__(self, *args):
+        """__init__(DirEntry self, DirEntry entryIn) -> DirEntry"""
+        this = _gdal.new_DirEntry(*args)
+        try:
+            self.this.append(this)
+        except Exception:
+            self.this = this
+    __swig_destroy__ = _gdal.delete_DirEntry
+    __del__ = lambda self: None
+
+    def IsDirectory(self, *args):
+        """IsDirectory(DirEntry self) -> bool"""
+        return _gdal.DirEntry_IsDirectory(self, *args)
+
+DirEntry_swigregister = _gdal.DirEntry_swigregister
+DirEntry_swigregister(DirEntry)
+
+
+def GetNextDirEntry(*args):
+    """GetNextDirEntry(VSIDIR * dir) -> DirEntry"""
+    return _gdal.GetNextDirEntry(*args)
+
+def CloseDir(*args):
+    """CloseDir(VSIDIR * dir)"""
+    return _gdal.CloseDir(*args)
 
 def SetConfigOption(*args):
     """SetConfigOption(char const * pszKey, char const * pszValue)"""
@@ -1383,6 +1531,10 @@ def RmdirRecursive(*args):
 def Rename(*args):
     """Rename(char const * pszOld, char const * pszNew) -> VSI_RETVAL"""
     return _gdal.Rename(*args)
+
+def Sync(*args, **kwargs):
+    """Sync(char const * pszSource, char const * pszTarget, char ** options=None, GDALProgressFunc callback=0, void * callback_data=None) -> bool"""
+    return _gdal.Sync(*args, **kwargs)
 
 def GetActualURL(*args):
     """GetActualURL(char const * utf8_path) -> char const *"""
@@ -1473,6 +1625,10 @@ def VSIFOpenExL(*args):
 def VSIFEofL(*args):
     """VSIFEofL(VSILFILE fp) -> int"""
     return _gdal.VSIFEofL(*args)
+
+def VSIFFlushL(*args):
+    """VSIFFlushL(VSILFILE fp) -> int"""
+    return _gdal.VSIFFlushL(*args)
 
 def VSIFCloseL(*args):
     """VSIFCloseL(VSILFILE fp) -> VSI_RETVAL"""
@@ -1647,8 +1803,8 @@ class Driver(MajorObject):
 Driver_swigregister = _gdal.Driver_swigregister
 Driver_swigregister(Driver)
 
-import ogr
-import osr
+from . import ogr
+from . import osr
 class ColorEntry(_object):
     """Proxy of C++ GDALColorEntry class."""
 
@@ -1920,9 +2076,19 @@ class Dataset(MajorObject):
         return _gdal.Dataset_GetProjectionRef(self, *args)
 
 
+    def GetSpatialRef(self, *args):
+        """GetSpatialRef(Dataset self) -> SpatialReference"""
+        return _gdal.Dataset_GetSpatialRef(self, *args)
+
+
     def SetProjection(self, *args):
         """SetProjection(Dataset self, char const * prj) -> CPLErr"""
         return _gdal.Dataset_SetProjection(self, *args)
+
+
+    def SetSpatialRef(self, *args):
+        """SetSpatialRef(Dataset self, SpatialReference srs)"""
+        return _gdal.Dataset_SetSpatialRef(self, *args)
 
 
     def GetGeoTransform(self, *args, **kwargs):
@@ -1950,14 +2116,24 @@ class Dataset(MajorObject):
         return _gdal.Dataset_GetGCPProjection(self, *args)
 
 
+    def GetGCPSpatialRef(self, *args):
+        """GetGCPSpatialRef(Dataset self) -> SpatialReference"""
+        return _gdal.Dataset_GetGCPSpatialRef(self, *args)
+
+
     def GetGCPs(self, *args):
         """GetGCPs(Dataset self)"""
         return _gdal.Dataset_GetGCPs(self, *args)
 
 
-    def SetGCPs(self, *args):
-        """SetGCPs(Dataset self, int nGCPs, char const * pszGCPProjection) -> CPLErr"""
-        return _gdal.Dataset_SetGCPs(self, *args)
+    def _SetGCPs(self, *args):
+        """_SetGCPs(Dataset self, int nGCPs, char const * pszGCPProjection) -> CPLErr"""
+        return _gdal.Dataset__SetGCPs(self, *args)
+
+
+    def _SetGCPs2(self, *args):
+        """_SetGCPs2(Dataset self, int nGCPs, SpatialReference hSRS) -> CPLErr"""
+        return _gdal.Dataset__SetGCPs2(self, *args)
 
 
     def FlushCache(self, *args):
@@ -2105,7 +2281,7 @@ class Dataset(MajorObject):
         """ Reading a chunk of a GDAL band into a numpy array. The optional (buf_xsize,buf_ysize,buf_type)
         parameters should generally not be specified if buf_obj is specified. The array is returned"""
 
-        import gdalnumeric
+        from osgeo import gdalnumeric
         return gdalnumeric.DatasetReadAsArray(self, xoff, yoff, xsize, ysize, buf_obj,
                                               buf_xsize, buf_ysize, buf_type,
                                               resample_alg=resample_alg,
@@ -2174,7 +2350,7 @@ class Dataset(MajorObject):
            Any reference to the array must be dropped before the last reference to the
            related dataset is also dropped.
         """
-        import gdalnumeric
+        from osgeo import gdalnumeric
         if xsize is None:
             xsize = self.RasterXSize
         if ysize is None:
@@ -2209,7 +2385,7 @@ class Dataset(MajorObject):
            Any reference to the array must be dropped before the last reference to the
            related dataset is also dropped.
         """
-        import gdalnumeric
+        from osgeo import gdalnumeric
         if xsize is None:
             xsize = self.RasterXSize
         if ysize is None:
@@ -2286,6 +2462,12 @@ class Dataset(MajorObject):
             return _gdal.Dataset_DeleteLayer(self, value)
         else:
             raise TypeError("Input %s is not of String or Int type" % type(value))
+
+    def SetGCPs(self, gcps, wkt_or_spatial_ref):
+        if isinstance(wkt_or_spatial_ref, str):
+            return self._SetGCPs(gcps, wkt_or_spatial_ref)
+        else:
+            return self._SetGCPs2(gcps, wkt_or_spatial_ref)
 
 Dataset_swigregister = _gdal.Dataset_swigregister
 Dataset_swigregister(Dataset)
@@ -2628,7 +2810,7 @@ class Band(MajorObject):
         """ Reading a chunk of a GDAL band into a numpy array. The optional (buf_xsize,buf_ysize,buf_type)
         parameters should generally not be specified if buf_obj is specified. The array is returned"""
 
-        import gdalnumeric
+        from osgeo import gdalnumeric
 
         return gdalnumeric.BandReadAsArray(self, xoff, yoff,
                                            win_xsize, win_ysize,
@@ -2641,7 +2823,7 @@ class Band(MajorObject):
                    resample_alg=gdalconst.GRIORA_NearestNeighbour,
                    callback=None,
                    callback_data=None):
-        import gdalnumeric
+        from osgeo import gdalnumeric
 
         return gdalnumeric.BandWriteArray(self, array, xoff, yoff,
                                           resample_alg=resample_alg,
@@ -2658,7 +2840,7 @@ class Band(MajorObject):
              Any reference to the array must be dropped before the last reference to the
              related dataset is also dropped.
           """
-          import gdalnumeric
+          from osgeo import gdalnumeric
           if xsize is None:
               xsize = self.XSize
           if ysize is None:
@@ -2681,7 +2863,7 @@ class Band(MajorObject):
              Any reference to the array must be dropped before the last reference to the
              related dataset is also dropped.
           """
-          import gdalnumeric
+          from osgeo import gdalnumeric
           if options is None:
               virtualmem = self.GetVirtualMemAuto(eAccess)
           else:
@@ -2698,7 +2880,7 @@ class Band(MajorObject):
              Any reference to the array must be dropped before the last reference to the
              related dataset is also dropped.
           """
-          import gdalnumeric
+          from osgeo import gdalnumeric
           if xsize is None:
               xsize = self.XSize
           if ysize is None:
@@ -2900,12 +3082,12 @@ class RasterAttributeTable(_object):
 
 
     def WriteArray(self, array, field, start=0):
-        import gdalnumeric
+        from osgeo import gdalnumeric
 
         return gdalnumeric.RATWriteArray(self, array, field, start)
 
     def ReadAsArray(self, field, start=0, length=None):
-        import gdalnumeric
+        from osgeo import gdalnumeric
 
         return gdalnumeric.RATReadArray(self, field, start, length)
 
@@ -2967,6 +3149,10 @@ def RegenerateOverview(*args, **kwargs):
 def ContourGenerate(*args, **kwargs):
     """ContourGenerate(Band srcBand, double contourInterval, double contourBase, int fixedLevelCount, int useNoData, double noDataValue, Layer dstLayer, int idField, int elevField, GDALProgressFunc callback=0, void * callback_data=None) -> int"""
     return _gdal.ContourGenerate(*args, **kwargs)
+
+def ContourGenerateEx(*args, **kwargs):
+    """ContourGenerateEx(Band srcBand, Layer dstLayer, char ** options=None, GDALProgressFunc callback=0, void * callback_data=None) -> int"""
+    return _gdal.ContourGenerateEx(*args, **kwargs)
 
 def AutoCreateWarpedVRT(*args):
     """AutoCreateWarpedVRT(Dataset src_ds, char const * src_wkt=None, char const * dst_wkt=None, GDALResampleAlg eResampleAlg, double maxerror=0.0) -> Dataset"""

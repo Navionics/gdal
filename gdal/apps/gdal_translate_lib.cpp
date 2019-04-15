@@ -577,6 +577,7 @@ GDALDatasetH GDALTranslate( const char *pszDest, GDALDatasetH hSrcDataset,
     if(psOptions->pszProjSRS != nullptr)
     {
         OGRSpatialReference oSRS;
+        oSRS.SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
 
         if( oSRS.SetFromUserInput( psOptions->pszProjSRS ) != OGRERR_NONE )
         {
@@ -596,6 +597,7 @@ GDALDatasetH GDALTranslate( const char *pszDest, GDALDatasetH hSrcDataset,
     if(psOptions->pszOutputSRS != nullptr)
     {
         OGRSpatialReference oOutputSRS;
+        oOutputSRS.SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
 
         if( oOutputSRS.SetFromUserInput( psOptions->pszOutputSRS ) != OGRERR_NONE )
         {
@@ -653,9 +655,11 @@ GDALDatasetH GDALTranslate( const char *pszDest, GDALDatasetH hSrcDataset,
 
     if( psOptions->panBandList == nullptr )
     {
+
         psOptions->nBandCount = GDALGetRasterCount( hSrcDataset );
-        if( psOptions->nBandCount == 0 )
+        if( ( psOptions->nBandCount == 0 ) && (psOptions->bStrict ) )
         {
+            // if not strict then the driver can fail if it doesn't support zero bands
             CPLError( CE_Failure, CPLE_AppDefined, "Input file has no bands, and so cannot be translated." );
             GDALTranslateOptionsFree(psOptions);
             return nullptr;
@@ -752,6 +756,8 @@ GDALDatasetH GDALTranslate( const char *pszDest, GDALDatasetH hSrcDataset,
             {
                 OGRSpatialReference oSRSIn;
                 OGRSpatialReference oSRSDS;
+                oSRSIn.SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
+                oSRSDS.SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
                 oSRSIn.SetFromUserInput(osProjSRS);
                 oSRSDS.SetFromUserInput(pszProjection);
                 if( !oSRSIn.IsSame(&oSRSDS) )
@@ -979,7 +985,8 @@ GDALDatasetH GDALTranslate( const char *pszDest, GDALDatasetH hSrcDataset,
     {
         CPLError(CE_Warning, CPLE_AppDefined,
                  "General options of gdal_translate make the "
-                 "COPY_SRC_OVERVIEWS creation option ineffective");
+                 "COPY_SRC_OVERVIEWS creation option ineffective as they hide "
+                 "the overviews");
     }
 
 /* -------------------------------------------------------------------- */

@@ -777,7 +777,6 @@ OGRShapeDataSource::ICreateLayer( const char * pszLayerName,
         CPLString osPrjFile =
             CPLFormFilename( nullptr, pszFilenameWithoutExt, "prj");
 
-        // The shape layer needs its own copy.
         poSRS = poSRS->Clone();
         poSRS->morphToESRI();
 
@@ -807,6 +806,10 @@ OGRShapeDataSource::ICreateLayer( const char * pszLayerName,
     OGRShapeLayer *poLayer =
         new OGRShapeLayer( this, pszFilename, hSHP, hDBF, poSRS,
                            true, true, eType );
+    if( poSRS != nullptr )
+    {
+        poSRS->Release();
+    }
 
     CPLFree( pszFilenameWithoutExt );
     CPLFree( pszFilename );
@@ -1140,6 +1143,20 @@ OGRLayer * OGRShapeDataSource::ExecuteSQL( const char *pszStatement,
 }
 
 /************************************************************************/
+/*                     GetExtensionsForDeletion()                       */
+/************************************************************************/
+
+const char* const* OGRShapeDataSource::GetExtensionsForDeletion()
+{
+    static const char * const apszExtensions[] =
+        { "shp", "shx", "dbf", "sbn", "sbx", "prj", "idm", "ind",
+          "qix", "cpg",
+          "qpj", // QGIS projection file
+          nullptr };
+    return apszExtensions;
+}
+
+/************************************************************************/
 /*                            DeleteLayer()                             */
 /************************************************************************/
 
@@ -1158,6 +1175,9 @@ OGRErr OGRShapeDataSource::DeleteLayer( int iLayer )
 
         return OGRERR_FAILURE;
     }
+
+    // To ensure that existing layers are created.
+    GetLayerCount();
 
     if( iLayer < 0 || iLayer >= nLayers )
     {
@@ -1181,11 +1201,16 @@ OGRErr OGRShapeDataSource::DeleteLayer( int iLayer )
 
     nLayers--;
 
-    VSIUnlink( CPLResetExtension(pszFilename, "shp") );
-    VSIUnlink( CPLResetExtension(pszFilename, "shx") );
-    VSIUnlink( CPLResetExtension(pszFilename, "dbf") );
-    VSIUnlink( CPLResetExtension(pszFilename, "prj") );
-    VSIUnlink( CPLResetExtension(pszFilename, "qix") );
+    const char * const* papszExtensions =
+        OGRShapeDataSource::GetExtensionsForDeletion();
+    for( int iExt = 0; papszExtensions[iExt] != nullptr; iExt++ )
+    {
+        const char *pszFile = CPLResetExtension(pszFilename,
+                                                papszExtensions[iExt]);
+        VSIStatBufL sStatBuf;
+        if( VSIStatL( pszFile, &sStatBuf ) == 0 )
+            VSIUnlink( pszFile );
+    }
 
     CPLFree( pszFilename );
 

@@ -31,6 +31,7 @@
 #include "ogr_geos.h"
 #include "ogr_p.h"
 
+#include <cmath>
 #include <cstdlib>
 #include <algorithm>
 #include <limits>
@@ -1256,13 +1257,13 @@ void OGRSimpleCurve::getPoints( OGRRawPoint * paoPointsOut,
  *
  * There is no SFCOM analog to this method.
  *
- * @param pabyX a buffer of at least (sizeof(double) * nXStride * nPointCount)
+ * @param pabyX a buffer of at least (nXStride * nPointCount)
  * bytes, may be NULL.
  * @param nXStride the number of bytes between 2 elements of pabyX.
- * @param pabyY a buffer of at least (sizeof(double) * nYStride * nPointCount)
+ * @param pabyY a buffer of at least (nYStride * nPointCount)
  * bytes, may be NULL.
  * @param nYStride the number of bytes between 2 elements of pabyY.
- * @param pabyZ a buffer of at last size (sizeof(double) * nZStride *
+ * @param pabyZ a buffer of at last size (nZStride *
  * nPointCount) bytes, may be NULL.
  * @param nZStride the number of bytes between 2 elements of pabyZ.
  *
@@ -1317,13 +1318,13 @@ void OGRSimpleCurve::getPoints( void* pabyX, int nXStride,
  *
  * There is no SFCOM analog to this method.
  *
- * @param pabyX a buffer of at least (sizeof(double) * nXStride * nPointCount) bytes, may be NULL.
+ * @param pabyX a buffer of at least (nXStride * nPointCount) bytes, may be NULL.
  * @param nXStride the number of bytes between 2 elements of pabyX.
- * @param pabyY a buffer of at least (sizeof(double) * nYStride * nPointCount) bytes, may be NULL.
+ * @param pabyY a buffer of at least (nYStride * nPointCount) bytes, may be NULL.
  * @param nYStride the number of bytes between 2 elements of pabyY.
- * @param pabyZ a buffer of at last size (sizeof(double) * nZStride * nPointCount) bytes, may be NULL.
+ * @param pabyZ a buffer of at last size (nZStride * nPointCount) bytes, may be NULL.
  * @param nZStride the number of bytes between 2 elements of pabyZ.
- * @param pabyM a buffer of at last size (sizeof(double) * nMStride * nPointCount) bytes, may be NULL.
+ * @param pabyM a buffer of at last size (nMStride * nPointCount) bytes, may be NULL.
  * @param nMStride the number of bytes between 2 elements of pabyM.
  *
  * @since OGR 2.1.0
@@ -2412,8 +2413,8 @@ OGRErr OGRSimpleCurve::transform( OGRCoordinateTransformation *poCT )
 /* -------------------------------------------------------------------- */
 /*      Transform and reapply.                                          */
 /* -------------------------------------------------------------------- */
-    poCT->TransformEx( nPointCount, xyz, xyz + nPointCount,
-                       xyz+nPointCount*2, pabSuccess );
+    poCT->Transform( nPointCount, xyz, xyz + nPointCount,
+                     xyz+nPointCount*2, nullptr, pabSuccess );
 
     const char* pszEnablePartialReprojection = nullptr;
 
@@ -2520,13 +2521,14 @@ void OGRSimpleCurve::segmentize( double dfMaxLength )
         reversePoints();
         segmentize(dfMaxLength);
         reversePoints();
+        return;
     }
 
     OGRRawPoint* paoNewPoints = nullptr;
     double* padfNewZ = nullptr;
+    double* padfNewM = nullptr;
     int nNewPointCount = 0;
     const double dfSquareMaxLength = dfMaxLength * dfMaxLength;
-    const int nCoordinateDimension = getCoordinateDimension();
 
     for( int i = 0; i < nPointCount; i++ )
     {
@@ -2535,11 +2537,18 @@ void OGRSimpleCurve::segmentize( double dfMaxLength )
                        sizeof(OGRRawPoint) * (nNewPointCount + 1)));
         paoNewPoints[nNewPointCount] = paoPoints[i];
 
-        if( nCoordinateDimension == 3 )
+        if( padfZ != nullptr )
         {
             padfNewZ = static_cast<double *>(
                 CPLRealloc(padfNewZ, sizeof(double) * (nNewPointCount + 1)));
             padfNewZ[nNewPointCount] = padfZ[i];
+        }
+
+        if( padfM != nullptr )
+        {
+            padfNewM = static_cast<double *>(
+                CPLRealloc(padfNewM, sizeof(double) * (nNewPointCount + 1)));
+            padfNewM[nNewPointCount] = padfM[i];
         }
 
         nNewPointCount++;
@@ -2550,10 +2559,10 @@ void OGRSimpleCurve::segmentize( double dfMaxLength )
         const double dfX = paoPoints[i+1].x - paoPoints[i].x;
         const double dfY = paoPoints[i+1].y - paoPoints[i].y;
         const double dfSquareDist = dfX * dfX + dfY * dfY;
-        if( dfSquareDist > dfSquareMaxLength )
+        if( dfSquareDist - dfSquareMaxLength > 1e-5 * dfSquareMaxLength )
         {
             const double dfIntermediatePoints =
-                floor(sqrt(dfSquareDist / dfSquareMaxLength));
+                floor(sqrt(dfSquareDist / dfSquareMaxLength) - 1e-2);
             const int nIntermediatePoints =
                 DoubleToIntClamp(dfIntermediatePoints);
 
@@ -2569,6 +2578,7 @@ void OGRSimpleCurve::segmentize( double dfMaxLength )
                          nNewPointCount, nIntermediatePoints);
                 CPLFree(paoNewPoints);
                 CPLFree(padfNewZ);
+                CPLFree(padfNewM);
                 return;
             }
 
@@ -2576,10 +2586,17 @@ void OGRSimpleCurve::segmentize( double dfMaxLength )
                 CPLRealloc(paoNewPoints,
                            sizeof(OGRRawPoint) * (nNewPointCount +
                                                   nIntermediatePoints)));
-            if( nCoordinateDimension == 3 )
+            if( padfZ != nullptr )
             {
                 padfNewZ = static_cast<double *>(
                     CPLRealloc(padfNewZ,
+                               sizeof(double) * (nNewPointCount +
+                                                 nIntermediatePoints)));
+            }
+            if( padfM != nullptr )
+            {
+                padfNewM = static_cast<double *>(
+                    CPLRealloc(padfNewM,
                                sizeof(double) * (nNewPointCount +
                                                  nIntermediatePoints)));
             }
@@ -2590,10 +2607,15 @@ void OGRSimpleCurve::segmentize( double dfMaxLength )
                     paoPoints[i].x + j * dfX / (nIntermediatePoints + 1);
                 paoNewPoints[nNewPointCount + j - 1].y =
                     paoPoints[i].y + j * dfY / (nIntermediatePoints + 1);
-                if( nCoordinateDimension == 3 )
+                if( padfZ != nullptr )
                 {
                     // No interpolation.
                     padfNewZ[nNewPointCount + j - 1] = padfZ[i];
+                }
+                if( padfM != nullptr )
+                {
+                    // No interpolation.
+                    padfNewM[nNewPointCount + j - 1] = padfM[i];
                 }
             }
 
@@ -2605,10 +2627,15 @@ void OGRSimpleCurve::segmentize( double dfMaxLength )
     paoPoints = paoNewPoints;
     nPointCount = nNewPointCount;
 
-    if( nCoordinateDimension == 3 )
+    if( padfZ != nullptr )
     {
         CPLFree(padfZ);
         padfZ = padfNewZ;
+    }
+    if( padfM != nullptr )
+    {
+        CPLFree(padfM);
+        padfM = padfNewM;
     }
 }
 

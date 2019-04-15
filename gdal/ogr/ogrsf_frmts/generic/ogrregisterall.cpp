@@ -48,7 +48,7 @@ void OGRRegisterAllInternal()
 #ifdef SHAPE_ENABLED
     RegisterOGRShape();
 #endif
-#ifdef TAB_ENABLED
+#ifdef MITAB_ENABLED
     RegisterOGRTAB();
 #endif
 #ifdef NTF_ENABLED
@@ -95,6 +95,7 @@ void OGRRegisterAllInternal()
 #endif
 #ifdef GEOJSON_ENABLED
     RegisterOGRGeoJSON();
+    RegisterOGRGeoJSONSeq();
     RegisterOGRESRIJSON();
     RegisterOGRTopoJSON();
 #endif
@@ -254,7 +255,7 @@ void OGRRegisterAllInternal()
 #ifdef SEGY_ENABLED
     RegisterOGRSEGY();
 #endif
-#ifdef FREEXL_ENABLED
+#ifdef XLS_ENABLED
     RegisterOGRXLS();
 #endif
 #ifdef ODS_ENABLED
@@ -290,6 +291,9 @@ void OGRRegisterAllInternal()
 #ifdef CSW_ENABLED
     RegisterOGRCSW();
 #endif
+#ifdef MONGODBV3_ENABLED
+    RegisterOGRMongoDBv3();
+#endif
 #ifdef MONGODB_ENABLED
     RegisterOGRMongoDB();
 #endif
@@ -307,9 +311,13 @@ void OGRRegisterAllInternal()
 #ifdef TIGER_ENABLED
     RegisterOGRTiger();
 #endif
-#ifdef AVCBIN_ENABLED
+#ifdef AVC_ENABLED
     RegisterOGRAVCBin();
     RegisterOGRAVCE00();
 #endif
+
+#ifdef NGW_ENABLED
+    RegisterOGRNGW();
+#endif // NGW_ENABLED
 
 } /* OGRRegisterAll */

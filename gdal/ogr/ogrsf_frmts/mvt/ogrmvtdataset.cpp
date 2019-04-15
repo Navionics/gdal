@@ -1870,6 +1870,8 @@ OGRMVTDataset::OGRMVTDataset(GByte* pabyData):
     m_pabyData(pabyData),
     m_poSRS(new OGRSpatialReference())
 {
+    m_poSRS->SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
+
     m_bClip = CPLTestBool(CPLGetConfigOption("OGR_MVT_CLIP", "YES"));
 
     // Default WebMercator tiling scheme
@@ -2052,8 +2054,14 @@ static int OGRMVTDriverIdentify( GDALOpenInfo* poOpenInfo )
         while( pabyData < pabyLayerEnd )
         {
             READ_VARUINT32(pabyData, pabyLayerEnd, nKey);
-            if( nKey == MAKE_KEY(knLAYER_NAME, WT_DATA) )
+            auto nFieldNumber = GET_FIELDNUMBER(nKey);
+            auto nWireType = GET_WIRETYPE(nKey);
+            if( nFieldNumber == knLAYER_NAME )
             {
+                if( nWireType != WT_DATA )
+                {
+                    CPLDebug("MVT", "Invalid wire type for layer_name field");
+                }
                 char* pszLayerName = nullptr;
                 unsigned int nTextSize = 0;
                 READ_TEXT_WITH_SIZE(pabyData, pabyLayerEnd, pszLayerName,
@@ -2068,8 +2076,12 @@ static int OGRMVTDriverIdentify( GDALOpenInfo* poOpenInfo )
                 CPLFree(pszLayerName);
                 bLayerNameFound = true;
             }
-            else if( nKey == MAKE_KEY(knLAYER_FEATURES, WT_DATA) )
+            else if( nFieldNumber == knLAYER_FEATURES )
             {
+                if( nWireType != WT_DATA )
+                {
+                    CPLDebug("MVT", "Invalid wire type for layer_features field");
+                }
                 unsigned int nFeatureLength = 0;
                 unsigned int nGeomType = 0;
                 READ_VARUINT32(pabyData, pabyLayerEnd, nFeatureLength);
@@ -2087,8 +2099,15 @@ static int OGRMVTDriverIdentify( GDALOpenInfo* poOpenInfo )
                 while( pabyData < pabyDataFeatureEnd )
                 {
                     READ_VARUINT32(pabyData, pabyDataFeatureEnd, nKey);
-                    if( nKey == MAKE_KEY(knFEATURE_TYPE, WT_VARINT) )
+                    nFieldNumber = GET_FIELDNUMBER(nKey);
+                    nWireType = GET_WIRETYPE(nKey);
+                    if( nFieldNumber == knFEATURE_TYPE)
                     {
+                        if( nWireType != WT_VARINT )
+                        {
+                            CPLDebug("MVT", "Invalid wire type for feature_type field");
+                            return FALSE;
+                        }
                         READ_VARUINT32(pabyData, pabyDataFeatureEnd, nGeomType);
                         if( nGeomType > knGEOM_TYPE_POLYGON )
                         {
@@ -2096,8 +2115,13 @@ static int OGRMVTDriverIdentify( GDALOpenInfo* poOpenInfo )
                             return FALSE;
                         }
                     }
-                    else if( nKey == MAKE_KEY(knFEATURE_TAGS, WT_DATA) )
+                    else if( nFieldNumber == knFEATURE_TAGS )
                     {
+                        if( nWireType != WT_DATA )
+                        {
+                            CPLDebug("MVT", "Invalid wire type for feature_tags field");
+                            return FALSE;
+                        }
                         unsigned int nTagsSize = 0;
                         READ_VARUINT32(pabyData, pabyDataFeatureEnd, nTagsSize);
                         if( nTagsSize == 0 || nTagsSize >
@@ -2123,6 +2147,11 @@ static int OGRMVTDriverIdentify( GDALOpenInfo* poOpenInfo )
                                 return FALSE;
                             }
                         }
+                    }
+                    else if( nFieldNumber == knFEATURE_GEOMETRY && nWireType != WT_DATA )
+                    {
+                        CPLDebug("MVT", "Invalid wire type for feature_geometry field");
+                        return FALSE;
                     }
                     else if( nKey == MAKE_KEY(knFEATURE_GEOMETRY, WT_DATA) &&
                             nGeomType >= 1 && nGeomType <= 3 )
@@ -2247,8 +2276,13 @@ static int OGRMVTDriverIdentify( GDALOpenInfo* poOpenInfo )
 
                 pabyData = pabyDataFeatureEnd;
             }
-            else if( nKey == MAKE_KEY(knLAYER_KEYS, WT_DATA) )
+            else if( nFieldNumber == knLAYER_KEYS )
             {
+                if( nWireType != WT_DATA )
+                {
+                    CPLDebug("MVT", "Invalid wire type for keys field");
+                    return FALSE;
+                }
                 char* pszKey = nullptr;
                 unsigned int nTextSize = 0;
                 READ_TEXT_WITH_SIZE(pabyData, pabyLayerEnd, pszKey, nTextSize);
@@ -2261,8 +2295,13 @@ static int OGRMVTDriverIdentify( GDALOpenInfo* poOpenInfo )
                 CPLFree(pszKey);
                 bKeyFound = true;
             }
-            else if( nKey == MAKE_KEY(knLAYER_VALUES, WT_DATA) )
+            else if( nFieldNumber == knLAYER_VALUES )
             {
+                if( nWireType != WT_DATA )
+                {
+                    CPLDebug("MVT", "Invalid wire type for values field");
+                    return FALSE;
+                }
                 unsigned int nValueLength = 0;
                 READ_VARUINT32(pabyData, pabyLayerEnd, nValueLength);
                 if( nValueLength == 0 ||
@@ -2273,18 +2312,32 @@ static int OGRMVTDriverIdentify( GDALOpenInfo* poOpenInfo )
                 }
                 pabyData += nValueLength;
             }
+            else if( GET_FIELDNUMBER(nKey) == knLAYER_EXTENT &&
+                     GET_WIRETYPE(nKey) != WT_VARINT )
+            {
+                CPLDebug("MVT", "Invalid wire type for extent field");
+                return FALSE;
+            }
+#if 0
+            // The check on extent is too fragile. Values of 65536 can be found
             else if( nKey == MAKE_KEY(knLAYER_EXTENT, WT_VARINT) )
             {
                 unsigned int nExtent = 0;
                 READ_VARUINT32(pabyData, pabyLayerEnd, nExtent);
-                if( nExtent < 128 || nExtent > 16384 )
+                if( nExtent < 128 || nExtent > 16834 )
                 {
                     CPLDebug("MVT", "Invalid extent: %u", nExtent);
                     return FALSE;
                 }
             }
-            else if( nKey == MAKE_KEY(knLAYER_VERSION, WT_VARINT) )
+#endif
+            else if( nFieldNumber == knLAYER_VERSION )
             {
+                if( nWireType != WT_VARINT )
+                {
+                    CPLDebug("MVT", "Invalid wire type for version field");
+                    return FALSE;
+                }
                 unsigned int nVersion = 0;
                 READ_VARUINT32(pabyData, pabyLayerEnd, nVersion);
                 if( nVersion != 1 && nVersion != 2 )
@@ -2424,7 +2477,8 @@ static void ConvertFromWGS84(OGRSpatialReference* poTargetSRS,
     else
     {
         OGRSpatialReference oSRS_EPSG4326;
-        oSRS_EPSG4326.SetFromUserInput(SRS_WKT_WGS84);
+        oSRS_EPSG4326.SetFromUserInput(SRS_WKT_WGS84_LAT_LONG);
+        oSRS_EPSG4326.SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
         OGRCoordinateTransformation* poCT = 
             OGRCreateCoordinateTransformation(&oSRS_EPSG4326, poTargetSRS);
         if( poCT )
@@ -3380,9 +3434,7 @@ OGRMVTWriterLayer::OGRMVTWriterLayer(OGRMVTWriterDataset* poDS,
             CPLError(
                 CE_Warning, CPLE_AppDefined,
                 "Failed to create coordinate transformation between the "
-                "input and target coordinate systems.  This may be because "
-                "they are not transformable, or because projection "
-                "services (PROJ.4 DLL/.so) could not be loaded.");
+                "input and target coordinate systems.");
         }
     }
 }
@@ -3444,6 +3496,8 @@ OGRMVTWriterDataset::OGRMVTWriterDataset()
 {
     // Default WebMercator tiling scheme
     m_poSRS = new OGRSpatialReference();
+    m_poSRS->SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
+
     InitWebMercatorTilingScheme(m_poSRS,
                                 m_dfTopX,
                                 m_dfTopY,
@@ -5434,7 +5488,8 @@ bool OGRMVTWriterDataset::GenerateMetadata(
     else
     {
         OGRSpatialReference oSRS_EPSG4326;
-        oSRS_EPSG4326.SetFromUserInput(SRS_WKT_WGS84);
+        oSRS_EPSG4326.SetFromUserInput(SRS_WKT_WGS84_LAT_LONG);
+        oSRS_EPSG4326.SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
         OGRCoordinateTransformation* poCT = 
             OGRCreateCoordinateTransformation(m_poSRS, &oSRS_EPSG4326);
         if( poCT )
@@ -5813,8 +5868,16 @@ OGRLayer* OGRMVTWriterDataset::ICreateLayer( const char* pszLayerName,
                                              OGRwkbGeometryType,
                                              char ** papszOptions )
 {
+    OGRSpatialReference* poSRSClone = poSRS;
+    if ( poSRSClone )
+    {
+        poSRSClone = poSRS->Clone();
+        poSRSClone->SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
+    }
     OGRMVTWriterLayer* poLayer =
-        new OGRMVTWriterLayer(this, pszLayerName, poSRS);
+        new OGRMVTWriterLayer(this, pszLayerName, poSRSClone);
+    if( poSRSClone )
+        poSRSClone->Release();
     poLayer->m_nMinZoom = m_nMinZoom;
     poLayer->m_nMaxZoom = m_nMaxZoom;
     poLayer->m_osTargetName = pszLayerName;
@@ -5931,9 +5994,14 @@ GDALDataset* OGRMVTWriterDataset::Create( const char * pszFilename,
     poDS->m_pMyVFS = OGRSQLiteCreateVFS(nullptr, poDS);
     sqlite3_vfs_register(poDS->m_pMyVFS, 0);
 
+    CPLString osTempDBDefault = CPLString(pszFilename) + ".temp.db";
+    if( STARTS_WITH(osTempDBDefault, "/vsizip/") )
+    {
+        osTempDBDefault = CPLString(pszFilename + strlen("/vsizip/")) + ".temp.db";
+    }
     CPLString osTempDB =
         CSLFetchNameValueDef(papszOptions, "TEMPORARY_DB",
-            (CPLString(pszFilename) + ".temp.db").c_str());
+                             osTempDBDefault.c_str());
     if( !bReuseTempFile )
         VSIUnlink(osTempDB);
 

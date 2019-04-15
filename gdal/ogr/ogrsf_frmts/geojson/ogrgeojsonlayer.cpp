@@ -46,15 +46,6 @@
 #endif  // !DEBUG_VERBOSE
 
 #include "ogr_geojson.h"
-
-// Remove annoying warnings Microsoft Visual C++:
-//   'class': assignment operator could not be generated.
-//     The compiler cannot generate an assignment operator for the given
-//     class. No assignment operator was created.
-#if defined(_MSC_VER)
-#  pragma warning(disable:4512)
-#endif
-
 #include "ogrgeojsonreader.h"
 
 CPL_CVSID("$Id$")
@@ -214,6 +205,10 @@ OGRFeature* OGRGeoJSONLayer::GetFeature(GIntBig nFID)
 {
     if( poReader_ )
     {
+        if( !IsUpdatable() )
+        {
+            return poReader_->GetFeature(this, nFID);
+        }
         return OGRLayer::GetFeature(nFID);
     }
     else

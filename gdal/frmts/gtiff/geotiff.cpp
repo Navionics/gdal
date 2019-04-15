@@ -63,7 +63,6 @@
 
 #include "cpl_config.h"
 #include "cpl_conv.h"
-#include "cpl_csv.h"
 #include "cpl_error.h"
 #include "cpl_minixml.h"
 #include "cpl_multiproc.h"
@@ -76,7 +75,6 @@
 #include "cpl_worker_thread_pool.h"
 #include "cplkeywordparser.h"
 #include "gdal.h"
-#include "gdal_csv.h"
 #include "gdal_frmts.h"
 #include "gdal_mdreader.h"
 #include "gdal_pam.h"
@@ -90,17 +88,20 @@
 #include "gt_wkt_srs.h"
 #include "gt_wkt_srs_priv.h"
 #include "ogr_spatialref.h"
+#include "ogr_proj_p.h"
 #include "tiff.h"
 #include "tif_float.h"
 #include "tiffio.h"
 #ifdef INTERNAL_LIBTIFF
 #  include "tiffiop.h"
 #  include "tif_lerc.h"
+#    ifdef WEBP_SUPPORT
+#      include "webp/encode.h"
+#    endif
 #endif
 #include "tiffvers.h"
 #include "tifvsi.h"
 #include "xtiffio.h"
-
 
 CPL_CVSID("$Id$")
 
@@ -231,11 +232,11 @@ typedef struct
     int           nHeight;
     uint16        nPredictor;
     GByte        *pabyBuffer;
-    int           nBufferSize;
+    GPtrDiff_t    nBufferSize;
     int           nStripOrTile;
 
     GByte        *pabyCompressedBuffer;  // Owned by pszTmpFilename.
-    int           nCompressedBufferSize;
+    GPtrDiff_t    nCompressedBufferSize;
     bool          bReady;
 } GTiffCompressionJob;
 #if !defined(__MINGW32__)
@@ -304,7 +305,7 @@ class GTiffDataset final : public GDALPamDataset
     CPLErr      FlushBlockBuf();
     bool        bWriteErrorInFlushBlockBuf;
 
-    char        *pszProjection;
+    OGRSpatialReference oSRS{};
     CPLString   m_osVertUnit{};
     bool        bLookedForProjection;
     bool        bLookedForMDAreaOrPoint;
@@ -373,7 +374,7 @@ class GTiffDataset final : public GDALPamDataset
     bool        bLoadingOtherBands;
 
     void*        pabyTempWriteBuffer;
-    int          nTempWriteBufferSize;
+    GPtrDiff_t   nTempWriteBufferSize;
     bool         WriteEncodedTile( uint32 tile, GByte* pabyData,
                                    int bPreserveDataBuffer );
     bool         WriteEncodedStrip( uint32 strip, GByte* pabyData,
@@ -423,6 +424,8 @@ class GTiffDataset final : public GDALPamDataset
     int           nZLevel;
     int           nLZMAPreset;
     int           nZSTDLevel;
+    int           nWebPLevel;
+    bool          bWebPLossless;
     int           nJpegQuality;
     int           nJpegTablesMode;
 #if HAVE_LERC
@@ -459,7 +462,7 @@ class GTiffDataset final : public GDALPamDataset
     bool           bHasDiscardedLsb;
     std::vector<int> anMaskLsb{};
     std::vector<int> anOffsetLsb{};
-    void           DiscardLsb(GByte* pabyBuffer, int nBytes, int iBand) const;
+    void           DiscardLsb(GByte* pabyBuffer, GPtrDiff_t nBytes, int iBand) const;
     void           GetDiscardLsbOption( char** papszOptions );
 
     CPLWorkerThreadPool *poCompressThreadPool;
@@ -471,9 +474,9 @@ class GTiffDataset final : public GDALPamDataset
     void           WaitCompletionForBlock( int nBlockId );
     void           WriteRawStripOrTile( int nStripOrTile,
                                         GByte* pabyCompressedBuffer,
-                                        int nCompressedBufferSize );
+                                        GPtrDiff_t nCompressedBufferSize );
     bool           SubmitCompressionJob( int nStripOrTile, GByte* pabyData,
-                                         int cc, int nHeight) ;
+                                         GPtrDiff_t cc, int nHeight) ;
 
     int            GuessJPEGQuality( bool& bOutHasQuantizationTable,
                                      bool& bOutHasHuffmanTable );
@@ -536,15 +539,17 @@ class GTiffDataset final : public GDALPamDataset
              GTiffDataset();
     virtual ~GTiffDataset();
 
-    virtual const char *GetProjectionRef() override;
-    virtual CPLErr SetProjection( const char * ) override;
+    const OGRSpatialReference* GetSpatialRef() const override;
+    CPLErr SetSpatialRef(const OGRSpatialReference* poSRS) override;
+
     virtual CPLErr GetGeoTransform( double * ) override;
     virtual CPLErr SetGeoTransform( double * ) override;
 
     virtual int    GetGCPCount() override;
-    virtual const char *GetGCPProjection() override;
+    const OGRSpatialReference* GetGCPSpatialRef() const override;
     virtual const GDAL_GCP *GetGCPs() override;
-    CPLErr         SetGCPs( int, const GDAL_GCP *, const char * ) override;
+    CPLErr SetGCPs( int nGCPCountIn, const GDAL_GCP *pasGCPListIn,
+                    const OGRSpatialReference* poSRS ) override;
 
     virtual CPLErr IRasterIO( GDALRWFlag eRWFlag,
                               int nXOff, int nYOff, int nXSize, int nYSize,
@@ -611,8 +616,6 @@ class GTiffDataset final : public GDALPamDataset
 
     static void SaveICCProfile( GTiffDataset *pDS, TIFF *hTIFF,
                                 char **papszParmList, uint32 nBitsPerSample );
-
-    static bool HasVerticalCS(const char* pszProjectionIn);
 };
 
 /************************************************************************/
@@ -819,7 +822,7 @@ CPLErr GTiffJPEGOverviewBand::IReadBlock( int nBlockXOff, int nBlockYOff,
     bool bErrOccurred = false;
     if( !poGDS->poParentDS->IsBlockAvailable(nBlockId, &nOffset, &nByteCount, &bErrOccurred) )
     {
-        memset(pImage, 0, nBlockXSize * nBlockYSize * nDataTypeSize );
+        memset(pImage, 0, static_cast<GPtrDiff_t>(nBlockXSize) * nBlockYSize * nDataTypeSize );
         if( bErrOccurred )
             return CE_Failure;
         return CE_None;
@@ -1038,12 +1041,12 @@ CPLErr GTiffJPEGOverviewBand::IReadBlock( int nBlockXOff, int nBlockYOff,
         }
         if( nBlockXOff * nBlockXSize > poGDS->GetRasterXSize() - nBufXSize )
         {
-            memset(pImage, 0, nBlockXSize * nBlockYSize * nDataTypeSize);
+            memset(pImage, 0, static_cast<GPtrDiff_t>(nBlockXSize) * nBlockYSize * nDataTypeSize);
             nBufXSize = poGDS->GetRasterXSize() - nBlockXOff * nBlockXSize;
         }
         if( nBlockYOff * nBlockYSize > poGDS->GetRasterYSize() - nBufYSize )
         {
-            memset(pImage, 0, nBlockXSize * nBlockYSize * nDataTypeSize);
+            memset(pImage, 0, static_cast<GPtrDiff_t>(nBlockXSize) * nBlockYSize * nDataTypeSize);
             nBufYSize = poGDS->GetRasterYSize() - nBlockYOff * nBlockYSize;
         }
 
@@ -1056,7 +1059,7 @@ CPLErr GTiffJPEGOverviewBand::IReadBlock( int nBlockXOff, int nBlockYOff,
                                  nReqXOff, nReqYOff, nReqXSize, nReqYSize,
                                  pImage,
                                  nBufXSize, nBufYSize, eDataType,
-                                 0, nBlockXSize * nDataTypeSize, nullptr );
+                                 0, static_cast<GPtrDiff_t>(nBlockXSize) * nDataTypeSize, nullptr );
         }
     }
 
@@ -1552,7 +1555,7 @@ int GTiffRasterBand::DirectIO( GDALRWFlag eRWFlag,
             const int nDTSize = nDTSizeBits / 8;
             poGDS->m_nTempBufferForCommonDirectIOSize =
                 static_cast<size_t>(
-                    nBlockXSize * nBlockYSize * nDTSize *
+                    static_cast<GPtrDiff_t>(nBlockXSize) * nBlockYSize * nDTSize *
                     (poGDS->nPlanarConfig == PLANARCONFIG_CONTIG ?
                      poGDS->nBands : 1) );
 
@@ -1938,8 +1941,8 @@ CPLVirtualMem* GTiffRasterBand::GetVirtualMemAutoInternal( GDALRWFlag eRWFlag,
         return nullptr;
     }
 
-    int nBlockSize =
-        nBlockXSize * nBlockYSize * GDALGetDataTypeSizeBytes(eDataType);
+    GPtrDiff_t nBlockSize =
+        static_cast<GPtrDiff_t>(nBlockXSize) * nBlockYSize * GDALGetDataTypeSizeBytes(eDataType);
     if( poGDS->nPlanarConfig == PLANARCONFIG_CONTIG )
         nBlockSize *= poGDS->nBands;
 
@@ -1978,10 +1981,9 @@ CPLVirtualMem* GTiffRasterBand::GetVirtualMemAutoInternal( GDALRWFlag eRWFlag,
             {
                 return nullptr;
             }
-            int ret =
-                static_cast<int>(
+            const auto ret =
                     TIFFWriteEncodedStrip( poGDS->hTIFF, 0, pabyData,
-                                           nBlockSize ) );
+                                           nBlockSize );
             VSI_TIFFFlushBufferedWrite( TIFFClientdata( poGDS->hTIFF ) );
             VSIFree(pabyData);
             if( ret != nBlockSize )
@@ -3795,7 +3797,7 @@ int GTiffDataset::DirectIO( GDALRWFlag eRWFlag,
         {
             const int nDTSize = nDTSizeBits / 8;
             m_nTempBufferForCommonDirectIOSize =
-                static_cast<size_t>(nBlockXSize * nBlockYSize * nDTSize *
+                static_cast<size_t>(static_cast<GPtrDiff_t>(nBlockXSize) * nBlockYSize * nDTSize *
                 ((nPlanarConfig == PLANARCONFIG_CONTIG) ? nBands : 1));
 
             m_pTempBufferForCommonDirectIO =
@@ -4038,10 +4040,10 @@ void* GTiffRasterBand::CacheMultiRange( int nXOff, int nYOff,
     const double dfSrcXInc = dfXSize / static_cast<double>( nBufXSize );
     const double dfSrcYInc = dfYSize / static_cast<double>( nBufYSize );
     const double EPS = 1e-10;
-    const int nBlockX1 = static_cast<int>((0+0.5) * dfSrcXInc + dfXOff + EPS) / nBlockXSize;
-    const int nBlockY1 = static_cast<int>((0+0.5) * dfSrcYInc + dfYOff + EPS) / nBlockYSize;
-    const int nBlockX2 = static_cast<int>((nBufXSize-1+0.5) * dfSrcXInc + dfXOff + EPS) / nBlockXSize;
-    const int nBlockY2 = static_cast<int>((nBufYSize-1+0.5) * dfSrcYInc + dfYOff + EPS) / nBlockYSize;
+    const int nBlockX1 = static_cast<int>(std::max(0.0, (0+0.5) * dfSrcXInc + dfXOff + EPS)) / nBlockXSize;
+    const int nBlockY1 = static_cast<int>(std::max(0.0, (0+0.5) * dfSrcYInc + dfYOff + EPS)) / nBlockYSize;
+    const int nBlockX2 = static_cast<int>(std::min(static_cast<double>(nRasterXSize - 1), (nBufXSize-1+0.5) * dfSrcXInc + dfXOff + EPS)) / nBlockXSize;
+    const int nBlockY2 = static_cast<int>(std::min(static_cast<double>(nRasterYSize - 1), (nBufYSize-1+0.5) * dfSrcYInc + dfYOff + EPS)) / nBlockYSize;
 
     thandle_t th = TIFFClientdata( poGDS->hTIFF );
     if( poGDS->SetDirectory() && !VSI_TIFFHasCachedRanges(th) )
@@ -4098,24 +4100,41 @@ void* GTiffRasterBand::CacheMultiRange( int nXOff, int nYOff,
                 std::vector<vsi_l_offset> anOffsets;
                 std::vector<size_t> anSizes;
                 std::vector<void*> apData;
+                anOffsets.push_back(aOffsetSize[0].first);
+                apData.push_back(static_cast<GByte *>(pBufferedData));
+                size_t nChunkSize = aOffsetSize[0].second;
                 size_t nAccOffset = 0;
-                for( size_t i = 0; i < aOffsetSize.size(); i++ )
+                for( size_t i = 0; i < aOffsetSize.size()-1; i++ )
                 {
-                    anOffsets.push_back(aOffsetSize[i].first);
-                    anSizes.push_back(aOffsetSize[i].second);
-                    apData.push_back(static_cast<GByte*>(pBufferedData) + nAccOffset);
-                    nAccOffset += aOffsetSize[i].second;
+                    if ( aOffsetSize[i].first + aOffsetSize[i].second == aOffsetSize[i+1].first ) 
+                    {
+                        nChunkSize += aOffsetSize[i+1].second;
+                    } else 
+                    {
+                        //terminate current block
+                        anSizes.push_back(nChunkSize);
+                        nAccOffset += nChunkSize;
+                        //start a new range
+                        anOffsets.push_back(aOffsetSize[i+1].first);
+                        apData.push_back(static_cast<GByte*>(pBufferedData) + nAccOffset);
+                        nChunkSize = aOffsetSize[i+1].second;
+                    }
                 }
+                //terminate last block 
+                anSizes.push_back(nChunkSize);
+
                 VSILFILE* fp = VSI_TIFFGetVSILFile(th);
+
+
                 if( VSIFReadMultiRangeL(
-                                    static_cast<int>(aOffsetSize.size()),
+                                    static_cast<int>(anSizes.size()),
                                     &apData[0],
                                     &anOffsets[0],
                                     &anSizes[0],
                                     fp ) == 0 )
                 {
                     VSI_TIFFSetCachedRanges( th,
-                                             static_cast<int>(aOffsetSize.size()),
+                                             static_cast<int>(anSizes.size()),
                                              &apData[0],
                                              &anOffsets[0],
                                              &anSizes[0] );
@@ -4345,15 +4364,15 @@ CPLErr GTiffRasterBand::IReadBlock( int nBlockXOff, int nBlockYOff,
     if( !poGDS->SetDirectory() )
         return CE_Failure;
 
-    int nBlockBufSize = 0;
+    GPtrDiff_t nBlockBufSize = 0;
     if( TIFFIsTiled(poGDS->hTIFF) )
     {
-        nBlockBufSize = static_cast<int>(TIFFTileSize( poGDS->hTIFF ));
+        nBlockBufSize = static_cast<GPtrDiff_t>(TIFFTileSize( poGDS->hTIFF ));
     }
     else
     {
         CPLAssert( nBlockXOff == 0 );
-        nBlockBufSize = static_cast<int>(TIFFStripSize( poGDS->hTIFF ));
+        nBlockBufSize = static_cast<GPtrDiff_t>(TIFFStripSize( poGDS->hTIFF ));
     }
 
     CPLAssert(nBlocksPerRow != 0);
@@ -4368,7 +4387,7 @@ CPLErr GTiffRasterBand::IReadBlock( int nBlockXOff, int nBlockYOff,
 /*      partially encoded.  This code reduces the requested data so     */
 /*      an error won't be reported in this case. (#1179)                */
 /* -------------------------------------------------------------------- */
-    int nBlockReqSize = nBlockBufSize;
+    auto nBlockReqSize = nBlockBufSize;
 
     if( nBlockYOff * nBlockYSize > nRasterYSize - nBlockYSize )
     {
@@ -4458,7 +4477,7 @@ CPLErr GTiffRasterBand::IReadBlock( int nBlockXOff, int nBlockYOff,
         if( eErr != CE_None )
         {
             memset( pImage, 0,
-                    nBlockXSize * nBlockYSize
+                    static_cast<GPtrDiff_t>(nBlockXSize) * nBlockYSize
                     * GDALGetDataTypeSizeBytes(eDataType) );
             return eErr;
         }
@@ -4473,9 +4492,9 @@ CPLErr GTiffRasterBand::IReadBlock( int nBlockXOff, int nBlockYOff,
     const int nWordBytes = poGDS->nBitsPerSample / 8;
     GByte* pabyImage = poGDS->pabyBlockBuf + (nBand - 1) * nWordBytes;
 
-    GDALCopyWords(pabyImage, eDataType, poGDS->nBands * nWordBytes,
+    GDALCopyWords64(pabyImage, eDataType, poGDS->nBands * nWordBytes,
                   pImage, eDataType, nWordBytes,
-                  nBlockXSize * nBlockYSize);
+                  static_cast<GPtrDiff_t>(nBlockXSize) * nBlockYSize);
 
     const CPLErr eErr = FillCacheForOtherBands(nBlockXOff, nBlockYOff);
 
@@ -4509,7 +4528,7 @@ CPLErr GTiffRasterBand::FillCacheForOtherBands( int nBlockXOff, int nBlockYOff )
     if( poGDS->nBands != 1 &&
         poGDS->nBands < 128 && // avoid caching for datasets with too many bands
         !poGDS->bLoadingOtherBands &&
-        nBlockXSize * nBlockYSize * GDALGetDataTypeSizeBytes(eDataType) <
+        static_cast<GPtrDiff_t>(nBlockXSize) * nBlockYSize * GDALGetDataTypeSizeBytes(eDataType) <
         GDALGetCacheMax64() / poGDS->nBands )
     {
         poGDS->bLoadingOtherBands = true;
@@ -4681,9 +4700,9 @@ CPLErr GTiffRasterBand::IWriteBlock( int nBlockXOff, int nBlockYOff,
 
         GByte *pabyOut = poGDS->pabyBlockBuf + iBand*nWordBytes;
 
-        GDALCopyWords(pabyThisImage, eDataType, nWordBytes,
+        GDALCopyWords64(pabyThisImage, eDataType, nWordBytes,
                       pabyOut, eDataType, nWordBytes * nBands,
-                      nBlockXSize * nBlockYSize);
+                      static_cast<GPtrDiff_t>(nBlockXSize) * nBlockYSize);
 
         if( poBlock != nullptr )
         {
@@ -5522,7 +5541,7 @@ CPLErr GTiffRasterBand::DeleteNoDataValue()
 void GTiffRasterBand::NullBlock( void *pData )
 
 {
-    const int nWords = nBlockXSize * nBlockYSize;
+    const GPtrDiff_t nWords = static_cast<GPtrDiff_t>(nBlockXSize) * nBlockYSize;
     const int nChunkSize = std::max(1, GDALGetDataTypeSizeBytes(eDataType));
 
     int bNoDataSetIn = FALSE;
@@ -5541,7 +5560,7 @@ void GTiffRasterBand::NullBlock( void *pData )
     else
     {
         // Will convert nodata value to the right type and copy efficiently.
-        GDALCopyWords( &dfNoData, GDT_Float64, 0,
+        GDALCopyWords64( &dfNoData, GDT_Float64, 0,
                        pData, eDataType, nChunkSize, nWords);
     }
 }
@@ -5888,7 +5907,7 @@ CPLErr GTiffRGBABand::IReadBlock( int nBlockXOff, int nBlockYOff,
         return CE_Failure;
 
     CPLAssert( nBlocksPerRow != 0 );
-    const int nBlockBufSize = 4 * nBlockXSize * nBlockYSize;
+    const auto nBlockBufSize = 4 * static_cast<GPtrDiff_t>(nBlockXSize) * nBlockYSize;
     const int nBlockId = nBlockXOff + nBlockYOff * nBlocksPerRow;
 
 #ifdef INTERNAL_LIBTIFF
@@ -6024,12 +6043,12 @@ CPLErr GTiffRGBABand::IReadBlock( int nBlockXOff, int nBlockYOff,
 
     for( int iDestLine = 0; iDestLine < nThisBlockYSize; ++iDestLine )
     {
-        const int nSrcOffset =
-            (nThisBlockYSize - iDestLine - 1) * nBlockXSize * 4;
+        const auto nSrcOffset =
+            static_cast<GPtrDiff_t>(nThisBlockYSize - iDestLine - 1) * nBlockXSize * 4;
 
         GDALCopyWords(
             poGDS->pabyBlockBuf + nBO + nSrcOffset, GDT_Byte, 4,
-            static_cast<GByte *>(pImage)+iDestLine*nBlockXSize, GDT_Byte, 1,
+            static_cast<GByte *>(pImage)+static_cast<GPtrDiff_t>(iDestLine)*nBlockXSize, GDT_Byte, 1,
             nBlockXSize );
     }
 
@@ -6238,22 +6257,22 @@ CPLErr GTiffOddBitsBand::IWriteBlock( int nBlockXOff, int nBlockYOff,
     {
         // TODO(schwehr): Create a CplNumBits8Aligned.
         // Bits per line rounds up to next byte boundary.
-        int nBitsPerLine = nBlockXSize * poGDS->nBitsPerSample;
+        GInt64 nBitsPerLine = static_cast<GInt64>(nBlockXSize) * poGDS->nBitsPerSample;
         if( (nBitsPerLine & 7) != 0 )
             nBitsPerLine = (nBitsPerLine + 7) & (~7);
 
-        int iPixel = 0;
+        GPtrDiff_t iPixel = 0;
 
         // Small optimization in 1 bit case.
         if( poGDS->nBitsPerSample == 1 )
         {
             for( int iY = 0; iY < nBlockYSize; ++iY, iPixel += nBlockXSize )
             {
-                int iBitOffset = iY * nBitsPerLine;
+                GInt64 iBitOffset = iY * nBitsPerLine;
 
                 const GByte* pabySrc =
                     static_cast<const GByte*>(pImage) + iPixel;
-                int iByteOffset = iBitOffset / 8;
+                auto iByteOffset = iBitOffset / 8;
                 int iX = 0;  // Used after for.
                 for( ; iX + 7 < nBlockXSize; iX += 8, iByteOffset++ )
                 {
@@ -6289,7 +6308,7 @@ CPLErr GTiffOddBitsBand::IWriteBlock( int nBlockXOff, int nBlockYOff,
 
         if( eDataType == GDT_Float32 && poGDS->nBitsPerSample == 16 )
         {
-            for( ; iPixel < nBlockYSize * nBlockXSize; iPixel++ )
+            for( ; iPixel < static_cast<GPtrDiff_t>(nBlockYSize) * nBlockXSize; iPixel++ )
             {
                 GUInt32 nInWord = static_cast<GUInt32 *>(pImage)[iPixel];
                 GUInt16 nHalf = FloatToHalf(nInWord, poGDS->bClipWarn);
@@ -6303,11 +6322,11 @@ CPLErr GTiffOddBitsBand::IWriteBlock( int nBlockXOff, int nBlockYOff,
 
         // Initialize to zero as we set the buffer with binary or operations.
         if( poGDS->nBitsPerSample != 24 )
-            memset(poGDS->pabyBlockBuf, 0, (nBitsPerLine / 8) * nBlockYSize);
+            memset(poGDS->pabyBlockBuf, 0, static_cast<size_t>((nBitsPerLine / 8) * nBlockYSize));
 
         for( int iY = 0; iY < nBlockYSize; ++iY )
         {
-            int iBitOffset = iY * nBitsPerLine;
+            GInt64 iBitOffset = iY * nBitsPerLine;
 
             if( poGDS->nBitsPerSample == 12 )
             {
@@ -6467,15 +6486,15 @@ CPLErr GTiffOddBitsBand::IWriteBlock( int nBlockXOff, int nBlockYOff,
         const int iBandBitOffset = iBand * poGDS->nBitsPerSample;
 
         // Bits per line rounds up to next byte boundary.
-        int nBitsPerLine = nBlockXSize * iPixelBitSkip;
+        GInt64 nBitsPerLine = static_cast<GInt64>(nBlockXSize) * iPixelBitSkip;
         if( (nBitsPerLine & 7) != 0 )
             nBitsPerLine = (nBitsPerLine + 7) & (~7);
 
-        int iPixel = 0;
+        GPtrDiff_t iPixel = 0;
 
         if( eDataType == GDT_Float32 && poGDS->nBitsPerSample == 16 )
         {
-            for( ; iPixel < nBlockYSize * nBlockXSize; iPixel++ )
+            for( ; iPixel < static_cast<GPtrDiff_t>(nBlockYSize) * nBlockXSize; iPixel++ )
             {
                 GUInt32 nInWord = reinterpret_cast<const GUInt32 *>(
                                                         pabyThisImage)[iPixel];
@@ -6494,7 +6513,7 @@ CPLErr GTiffOddBitsBand::IWriteBlock( int nBlockXOff, int nBlockYOff,
 
         for( int iY = 0; iY < nBlockYSize; ++iY )
         {
-            int iBitOffset = iBandBitOffset + iY * nBitsPerLine;
+            GInt64 iBitOffset = iBandBitOffset + iY * nBitsPerLine;
 
             if( poGDS->nBitsPerSample == 12 )
             {
@@ -6646,9 +6665,9 @@ CPLErr GTiffOddBitsBand::IWriteBlock( int nBlockXOff, int nBlockYOff,
 
 static void ExpandPacked8ToByte1( const GByte * const CPL_RESTRICT pabySrc,
                                   GByte* const CPL_RESTRICT pabyDest,
-                                  int nBytes )
+                                  GPtrDiff_t nBytes )
 {
-    for( int i = 0, j = 0; i < nBytes; i++, j+= 8 )
+    for( decltype(nBytes) i = 0, j = 0; i < nBytes; i++, j+= 8 )
     {
         const GByte byVal = pabySrc[i];
         pabyDest[j+0] = (byVal >> 7) & 0x1;
@@ -6682,9 +6701,9 @@ static inline GByte ExtractBitAndConvertTo255(GByte byVal, int nBit)
 
 static void ExpandPacked8ToByte255( const GByte * const CPL_RESTRICT pabySrc,
                                     GByte* const CPL_RESTRICT pabyDest,
-                                    int nBytes )
+                                    GPtrDiff_t nBytes )
 {
-    for( int i = 0, j = 0; i < nBytes; i++, j += 8 )
+    for( decltype(nBytes) i = 0, j = 0; i < nBytes; i++, j += 8 )
     {
         const GByte byVal = pabySrc[i];
         pabyDest[j+0] = ExtractBitAndConvertTo255(byVal, 7);
@@ -6743,13 +6762,13 @@ CPLErr GTiffOddBitsBand::IReadBlock( int nBlockXOff, int nBlockYOff,
 /* -------------------------------------------------------------------- */
 /*      Translate 1bit data to eight bit.                               */
 /* -------------------------------------------------------------------- */
-        int iDstOffset = 0;
+        GPtrDiff_t iDstOffset = 0;
         const GByte * const CPL_RESTRICT pabyBlockBuf = poGDS->pabyBlockBuf;
         GByte* CPL_RESTRICT pabyDest = static_cast<GByte *>(pImage);
 
         for( int iLine = 0; iLine < nBlockYSize; ++iLine )
         {
-            int iSrcOffsetByte = ((nBlockXSize + 7) >> 3) * iLine;
+            GPtrDiff_t iSrcOffsetByte = static_cast<GPtrDiff_t>((nBlockXSize + 7) >> 3) * iLine;
 
             if( !poGDS->bPromoteTo8Bits )
             {
@@ -6763,7 +6782,7 @@ CPLErr GTiffOddBitsBand::IReadBlock( int nBlockXOff, int nBlockYOff,
                                         pabyDest + iDstOffset,
                                         nBlockXSize / 8 );
             }
-            int iSrcOffsetBit = (iSrcOffsetByte + nBlockXSize / 8) * 8;
+            GPtrDiff_t iSrcOffsetBit = (iSrcOffsetByte + nBlockXSize / 8) * 8;
             iDstOffset += nBlockXSize & ~0x7;
             const GByte bSetVal = poGDS->bPromoteTo8Bits ? 255 : 1;
             for( int iPixel = nBlockXSize & ~0x7 ;
@@ -6792,10 +6811,10 @@ CPLErr GTiffOddBitsBand::IReadBlock( int nBlockXOff, int nBlockYOff,
             ( poGDS->nPlanarConfig == PLANARCONFIG_SEPARATE ) ?
             nWordBytes : poGDS->nBands * nWordBytes;
 
-        const int nBlockPixels = nBlockXSize * nBlockYSize;
+        const auto nBlockPixels = static_cast<GPtrDiff_t>(nBlockXSize) * nBlockYSize;
         if( poGDS->nBitsPerSample == 16 )
         {
-            for( int i = 0; i < nBlockPixels; ++i )
+            for( GPtrDiff_t i = 0; i < nBlockPixels; ++i )
             {
                 static_cast<GUInt32 *>(pImage)[i] =
                     HalfToFloat( *reinterpret_cast<const GUInt16 *>(pabyImage) );
@@ -6804,7 +6823,7 @@ CPLErr GTiffOddBitsBand::IReadBlock( int nBlockXOff, int nBlockYOff,
         }
         else if( poGDS->nBitsPerSample == 24 )
         {
-            for( int i = 0; i < nBlockPixels; ++i )
+            for( GPtrDiff_t i = 0; i < nBlockPixels; ++i )
             {
 #ifdef CPL_MSB
                 static_cast<GUInt32 *>(pImage)[i] =
@@ -6843,18 +6862,18 @@ CPLErr GTiffOddBitsBand::IReadBlock( int nBlockXOff, int nBlockYOff,
         }
 
         // Bits per line rounds up to next byte boundary.
-        int nBitsPerLine = nBlockXSize * iPixelBitSkip;
+        GPtrDiff_t nBitsPerLine = static_cast<GPtrDiff_t>(nBlockXSize) * iPixelBitSkip;
         if( (nBitsPerLine & 7) != 0 )
             nBitsPerLine = (nBitsPerLine + 7) & (~7);
 
         int iPixel = 0;
         for( int iY = 0; iY < nBlockYSize; ++iY )
         {
-            int iBitOffset = iBandBitOffset + iY * nBitsPerLine;
+            GPtrDiff_t iBitOffset = iBandBitOffset + iY * nBitsPerLine;
 
             for( int iX = 0; iX < nBlockXSize; ++iX )
             {
-                const int iByte = iBitOffset >> 3;
+                const auto iByte = iBitOffset >> 3;
 
                 if( (iBitOffset & 0x7) == 0 )
                 {
@@ -6896,9 +6915,9 @@ CPLErr GTiffOddBitsBand::IReadBlock( int nBlockXOff, int nBlockYOff,
             iPixelByteSkip = poGDS->nBitsPerSample / 8;
         }
 
-        const int nBytesPerLine = nBlockXSize * iPixelByteSkip;
+        const GPtrDiff_t nBytesPerLine = static_cast<GPtrDiff_t>(nBlockXSize) * iPixelByteSkip;
 
-        int iPixel = 0;
+        GPtrDiff_t iPixel = 0;
         for( int iY = 0; iY < nBlockYSize; ++iY )
         {
             GByte *pabyImage =
@@ -6947,7 +6966,7 @@ CPLErr GTiffOddBitsBand::IReadBlock( int nBlockXOff, int nBlockYOff,
 
         const GByte * const pabyBlockBuf = poGDS->pabyBlockBuf;
         const unsigned nBitsPerSample = poGDS->nBitsPerSample;
-        unsigned iPixel = 0;
+        GPtrDiff_t iPixel = 0;
 
         if( nBitsPerSample == 1 && eDataType == GDT_Byte )
         {
@@ -7335,7 +7354,6 @@ GTiffDataset::GTiffDataset() :
     bLoadedBlockDirty(false),
     pabyBlockBuf(nullptr),
     bWriteErrorInFlushBlockBuf(false),
-    pszProjection(CPLStrdup("")),
     bLookedForProjection(false),
     bLookedForMDAreaOrPoint(false),
     bGeoTransformValid(false),
@@ -7382,6 +7400,8 @@ GTiffDataset::GTiffDataset() :
     nZLevel(-1),
     nLZMAPreset(-1),
     nZSTDLevel(-1),
+    nWebPLevel(-1),
+    bWebPLossless(false),
     nJpegQuality(-1),
     nJpegTablesMode(-1),
     bPromoteTo8Bits(false),
@@ -7430,6 +7450,8 @@ GTiffDataset::GTiffDataset() :
         eVirtualMemIOUsage = VIRTUAL_MEM_IO_IF_ENOUGH_RAM;
     else if( CPLTestBool(pszVirtualMemIO) )
         eVirtualMemIOUsage = VIRTUAL_MEM_IO_YES;
+
+    oSRS.SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
 }
 
 /************************************************************************/
@@ -7608,9 +7630,6 @@ int GTiffDataset::Finalize()
         nGCPCount = 0;
     }
 
-    CPLFree( pszProjection );
-    pszProjection = nullptr;
-
     CSLDestroy( papszCreationOptions );
     papszCreationOptions = nullptr;
 
@@ -7771,10 +7790,10 @@ void GTiffDataset::FillEmptyTiles()
 /* -------------------------------------------------------------------- */
 /*      Prepare a blank data buffer to write for uninitialized blocks.  */
 /* -------------------------------------------------------------------- */
-    const int nBlockBytes =
+    const GPtrDiff_t nBlockBytes =
         TIFFIsTiled( hTIFF ) ?
-        static_cast<int>(TIFFTileSize(hTIFF)) :
-        static_cast<int>(TIFFStripSize(hTIFF));
+        static_cast<GPtrDiff_t>(TIFFTileSize(hTIFF)) :
+        static_cast<GPtrDiff_t>(TIFFStripSize(hTIFF));
 
     GByte *pabyData =
         static_cast<GByte *>( VSI_CALLOC_VERBOSE(nBlockBytes, 1) );
@@ -7796,7 +7815,7 @@ void GTiffDataset::FillEmptyTiles()
         if( nDataTypeSize &&
             nDataTypeSize * 8 == static_cast<int>(nBitsPerSample) )
         {
-            GDALCopyWords( &dfNoDataValue, GDT_Float64, 0,
+            GDALCopyWords64( &dfNoDataValue, GDT_Float64, 0,
                            pabyData, eDataType,
                            nDataTypeSize,
                            nBlockBytes / nDataTypeSize );
@@ -7813,10 +7832,10 @@ void GTiffDataset::FillEmptyTiles()
                 VSI_MALLOC3_VERBOSE(nBlockXSize, nBlockYSize, nDataTypeSize) );
             if( pabyData == nullptr )
                 return;
-            GDALCopyWords( &dfNoDataValue, GDT_Float64, 0,
+            GDALCopyWords64( &dfNoDataValue, GDT_Float64, 0,
                            pabyData, eDataType,
                            nDataTypeSize,
-                           nBlockXSize * nBlockYSize );
+                           static_cast<GPtrDiff_t>(nBlockXSize) * nBlockYSize );
             const int nBlocksPerRow = DIV_ROUND_UP(nRasterXSize, nBlockXSize);
             for( int iBlock = 0; iBlock < nBlockCount; ++iBlock )
             {
@@ -7967,14 +7986,14 @@ void GTiffDataset::FillEmptyTiles()
                 if( nCompression != COMPRESSION_NONE )
                 {
                     pabyRaw = static_cast<GByte*>(
-                            VSI_MALLOC_VERBOSE(static_cast<int>(nRawSize)));
+                            VSI_MALLOC_VERBOSE(static_cast<size_t>(nRawSize)));
                     if( pabyRaw )
                     {
                         VSILFILE* fp = VSI_TIFFGetVSILFile(
                                                     TIFFClientdata( hTIFF ));
                         const vsi_l_offset nCurOffset = VSIFTellL(fp);
                         VSIFSeekL(fp, nOffset, SEEK_SET);
-                        VSIFReadL(pabyRaw, 1, static_cast<int>(nRawSize), fp);
+                        VSIFReadL(pabyRaw, 1, static_cast<size_t>(nRawSize), fp);
                         VSIFSeekL(fp, nCurOffset, SEEK_SET);
                     }
                 }
@@ -7982,7 +8001,7 @@ void GTiffDataset::FillEmptyTiles()
             else
             {
                 WriteRawStripOrTile( iBlock, pabyRaw,
-                                     static_cast<int>(nRawSize) );
+                                     static_cast<GPtrDiff_t>(nRawSize) );
             }
         }
     }
@@ -8270,7 +8289,7 @@ bool GTiffDataset::WriteEncodedTile( uint32 tile, GByte *pabyData,
     // TIFFWriteEncodedTile from altering the buffer as part of
     // byte swapping the data on write then we will need a temporary
     // working buffer.  If not, we can just do a direct write.
-    const int cc = static_cast<int>(TIFFTileSize( hTIFF ));
+    const GPtrDiff_t cc = static_cast<GPtrDiff_t>(TIFFTileSize( hTIFF ));
 
     if( bPreserveDataBuffer
         && (TIFFIsByteSwapped(hTIFF) || bNeedTileFill || bHasDiscardedLsb) )
@@ -8311,8 +8330,8 @@ bool GTiffDataset::WriteEncodedTile( uint32 tile, GByte *pabyData,
         {
             for( int iY = 0; iY < nBlockYSize; ++iY )
             {
-                memcpy( pabyData + (nBlockXSize * iY + iX) * nComponents,
-                        pabyData + (nBlockXSize * iY + iSrcX) * nComponents,
+                memcpy( pabyData + (static_cast<GPtrDiff_t>(nBlockXSize) * iY + iX) * nComponents,
+                        pabyData + (static_cast<GPtrDiff_t>(nBlockXSize) * iY + iSrcX) * nComponents,
                         nComponents );
             }
         }
@@ -8321,9 +8340,9 @@ bool GTiffDataset::WriteEncodedTile( uint32 tile, GByte *pabyData,
         const int iSrcY = nBlockYSize - nBottomPixelsToFill - 1;
         for( int iY = iSrcY + 1; iY < nBlockYSize; ++iY )
         {
-            memcpy( pabyData + nBlockXSize * nComponents * iY,
-                    pabyData + nBlockXSize * nComponents * iSrcY,
-                    nBlockXSize * nComponents );
+            memcpy( pabyData + static_cast<GPtrDiff_t>(nBlockXSize) * nComponents * iY,
+                    pabyData + static_cast<GPtrDiff_t>(nBlockXSize) * nComponents * iSrcY,
+                    static_cast<GPtrDiff_t>(nBlockXSize) * nComponents );
         }
     }
 
@@ -8344,10 +8363,10 @@ bool GTiffDataset::WriteEncodedTile( uint32 tile, GByte *pabyData,
                      tile, nLastWrittenBlockId + 1);
             return false;
         }
-        if( static_cast<int>( VSIFWriteL(pabyData, 1, cc, fpToWrite) ) != cc )
+        if( static_cast<GPtrDiff_t>( VSIFWriteL(pabyData, 1, cc, fpToWrite) ) != cc )
         {
-            CPLError( CE_Failure, CPLE_FileIO, "Could not write %d bytes",
-                      cc );
+            CPLError( CE_Failure, CPLE_FileIO, "Could not write " CPL_FRMT_GUIB " bytes",
+                      static_cast<GUIntBig>(cc) );
             return false;
         }
         nLastWrittenBlockId = tile;
@@ -8365,7 +8384,7 @@ bool GTiffDataset::WriteEncodedTile( uint32 tile, GByte *pabyData,
     const CPLErr eBefore = CPLGetLastErrorType();
 #endif
     const bool bRet =
-        static_cast<int>(TIFFWriteEncodedTile(hTIFF, tile, pabyData, cc)) == cc;
+        TIFFWriteEncodedTile(hTIFF, tile, pabyData, cc) == cc;
 #if !defined(INTERNAL_LIBTIFF) && (!defined(TIFFLIB_VERSION) || (TIFFLIB_VERSION <= 20150912))
     if( eBefore == CE_None && CPLGetLastErrorType() == CE_Failure )
         return false;
@@ -8380,7 +8399,7 @@ bool GTiffDataset::WriteEncodedTile( uint32 tile, GByte *pabyData,
 bool GTiffDataset::WriteEncodedStrip( uint32 strip, GByte* pabyData,
                                       int bPreserveDataBuffer )
 {
-    int cc = static_cast<int>(TIFFStripSize( hTIFF ));
+    GPtrDiff_t cc = static_cast<GPtrDiff_t>(TIFFStripSize( hTIFF ));
 
 /* -------------------------------------------------------------------- */
 /*      If this is the last strip in the image, and is partial, then    */
@@ -8394,8 +8413,9 @@ bool GTiffDataset::WriteEncodedStrip( uint32 strip, GByte* pabyData,
     {
         nStripHeight = GetRasterYSize() - nStripWithinBand * nRowsPerStrip;
         cc = (cc / nRowsPerStrip) * nStripHeight;
-        CPLDebug( "GTiff", "Adjusted bytes to write from %d to %d.",
-                  static_cast<int>(TIFFStripSize(hTIFF)), cc );
+        CPLDebug( "GTiff", "Adjusted bytes to write from " CPL_FRMT_GUIB " to " CPL_FRMT_GUIB ".",
+                  static_cast<GUIntBig>(TIFFStripSize(hTIFF)),
+                  static_cast<GUIntBig>(cc) );
     }
 
 /* -------------------------------------------------------------------- */
@@ -8450,10 +8470,10 @@ bool GTiffDataset::WriteEncodedStrip( uint32 strip, GByte* pabyData,
                      strip, nLastWrittenBlockId + 1);
             return false;
         }
-        if( static_cast<int>( VSIFWriteL(pabyData, 1, cc, fpToWrite) ) != cc )
+        if( static_cast<GPtrDiff_t>(VSIFWriteL(pabyData, 1, cc, fpToWrite)) != cc )
         {
-            CPLError(CE_Failure, CPLE_FileIO, "Could not write %d bytes",
-                     cc);
+            CPLError(CE_Failure, CPLE_FileIO, "Could not write " CPL_FRMT_GUIB " bytes",
+                     static_cast<GUIntBig>(cc));
             return false;
         }
         nLastWrittenBlockId = strip;
@@ -8470,9 +8490,7 @@ bool GTiffDataset::WriteEncodedStrip( uint32 strip, GByte* pabyData,
 #if !defined(INTERNAL_LIBTIFF) && (!defined(TIFFLIB_VERSION) || (TIFFLIB_VERSION <= 20150912))
     CPLErr eBefore = CPLGetLastErrorType();
 #endif
-    bool bRet =
-        static_cast<int>(TIFFWriteEncodedStrip( hTIFF, strip,
-                                                pabyData, cc)) == cc;
+    bool bRet = TIFFWriteEncodedStrip( hTIFF, strip, pabyData, cc) == cc;
 #if !defined(INTERNAL_LIBTIFF) && (!defined(TIFFLIB_VERSION) || (TIFFLIB_VERSION <= 20150912))
     if( eBefore == CE_None && CPLGetLastErrorType() == CE_Failure )
         bRet = FALSE;
@@ -8561,7 +8579,8 @@ void GTiffDataset::InitCompressionThreads( char** papszOptions )
                     // (if using TIFFWriteEncodedStrip/Tile first,
                     // TIFFWriteBufferSetup() is automatically called).
                     // This should likely rather fixed in libtiff itself.
-                    TIFFWriteBufferSetup(hTIFF, nullptr, -1);
+                    CPL_IGNORE_RET_VAL(
+                        TIFFWriteBufferSetup(hTIFF, nullptr, -1));
                 }
             }
         }
@@ -8635,6 +8654,10 @@ void GTiffDataset::ThreadCompressionFunc( void* pData )
                      poDS->anLercAddCompressionAndVersion);
     }
 #endif
+    if( poDS->nWebPLevel > 0 && poDS->nCompression == COMPRESSION_WEBP)
+        TIFFSetField(hTIFFTmp, TIFFTAG_WEBP_LEVEL, poDS->nWebPLevel);
+    if( poDS->bWebPLossless && poDS->nCompression == COMPRESSION_WEBP)
+        TIFFSetField(hTIFFTmp, TIFFTAG_WEBP_LOSSLESS, 1);
     TIFFSetField(hTIFFTmp, TIFFTAG_PHOTOMETRIC, poDS->nPhotometric);
     TIFFSetField(hTIFFTmp, TIFFTAG_SAMPLEFORMAT, poDS->nSampleFormat);
     TIFFSetField(hTIFFTmp, TIFFTAG_SAMPLESPERPIXEL, poDS->nSamplesPerPixel);
@@ -8645,7 +8668,7 @@ void GTiffDataset::ThreadCompressionFunc( void* pData )
         TIFFWriteEncodedStrip(hTIFFTmp, 0, psJob->pabyBuffer,
                               psJob->nBufferSize) == psJob->nBufferSize;
 
-    int nOffset = 0;
+    toff_t nOffset = 0;
     if( bOK )
     {
         toff_t* panOffsets = nullptr;
@@ -8653,8 +8676,8 @@ void GTiffDataset::ThreadCompressionFunc( void* pData )
         TIFFGetField(hTIFFTmp, TIFFTAG_STRIPOFFSETS, &panOffsets);
         TIFFGetField(hTIFFTmp, TIFFTAG_STRIPBYTECOUNTS, &panByteCounts);
 
-        nOffset = static_cast<int>( panOffsets[0]);
-        psJob->nCompressedBufferSize = static_cast<int>( panByteCounts[0] );
+        nOffset = panOffsets[0];
+        psJob->nCompressedBufferSize = static_cast<GPtrDiff_t>(panByteCounts[0]);
     }
     else
     {
@@ -8681,8 +8704,7 @@ void GTiffDataset::ThreadCompressionFunc( void* pData )
         GByte* pabyCompressedBuffer = VSIGetMemFileBuffer(psJob->pszTmpFilename,
                                                           &nFileSize,
                                                           FALSE);
-        CPLAssert( nOffset + psJob->nCompressedBufferSize <=
-                   static_cast<int>(nFileSize) );
+        CPLAssert( static_cast<vsi_l_offset>(nOffset + psJob->nCompressedBufferSize) <= nFileSize );
         psJob->pabyCompressedBuffer = pabyCompressedBuffer + nOffset;
     }
     else
@@ -8702,11 +8724,11 @@ void GTiffDataset::ThreadCompressionFunc( void* pData )
 
 void GTiffDataset::WriteRawStripOrTile( int nStripOrTile,
                                         GByte* pabyCompressedBuffer,
-                                        int nCompressedBufferSize )
+                                        GPtrDiff_t nCompressedBufferSize )
 {
 #ifdef DEBUG_VERBOSE
-    CPLDebug("GTIFF", "Writing raw strip/tile %d, size %d",
-             nStripOrTile, nCompressedBufferSize);
+    CPLDebug("GTIFF", "Writing raw strip/tile %d, size " CPL_FRMT_GUIB,
+             nStripOrTile, static_cast<GUIntBig>(nCompressedBufferSize));
 #endif
     toff_t *panOffsets = nullptr;
     if( TIFFGetField(
@@ -8773,7 +8795,7 @@ void GTiffDataset::WaitCompletionForBlock(int nBlockId)
 /************************************************************************/
 
 bool GTiffDataset::SubmitCompressionJob( int nStripOrTile, GByte* pabyData,
-                                         int cc, int nHeight )
+                                         GPtrDiff_t cc, int nHeight )
 {
 /* -------------------------------------------------------------------- */
 /*      Should we do compression in a worker thread ?                   */
@@ -8784,7 +8806,8 @@ bool GTiffDataset::SubmitCompressionJob( int nStripOrTile, GByte* pabyData,
             nCompression == COMPRESSION_PACKBITS ||
             nCompression == COMPRESSION_LZMA ||
             nCompression == COMPRESSION_ZSTD ||
-            nCompression == COMPRESSION_LERC) ) )
+            nCompression == COMPRESSION_LERC ||
+            nCompression == COMPRESSION_WEBP) ) )
         return false;
 
     int nNextCompressionJobAvail = -1;
@@ -8842,7 +8865,7 @@ bool GTiffDataset::SubmitCompressionJob( int nStripOrTile, GByte* pabyData,
 /*                          DiscardLsb()                                */
 /************************************************************************/
 
-void GTiffDataset::DiscardLsb( GByte* pabyBuffer, int nBytes, int iBand ) const
+void GTiffDataset::DiscardLsb( GByte* pabyBuffer, GPtrDiff_t nBytes, int iBand ) const
 {
     if( nBitsPerSample == 8 )
     {
@@ -8850,7 +8873,7 @@ void GTiffDataset::DiscardLsb( GByte* pabyBuffer, int nBytes, int iBand ) const
         {
             const int nMask = anMaskLsb[iBand];
             const int nOffset = anOffsetLsb[iBand];
-            for( int i = 0; i < nBytes; ++i )
+            for( decltype(nBytes) i = 0; i < nBytes; ++i )
             {
                 // Keep 255 in case it is alpha.
                 if( pabyBuffer[i] != 255 )
@@ -8860,7 +8883,7 @@ void GTiffDataset::DiscardLsb( GByte* pabyBuffer, int nBytes, int iBand ) const
         }
         else
         {
-            for( int i = 0; i < nBytes; i += nBands )
+            for( decltype(nBytes) i = 0; i < nBytes; i += nBands )
             {
                 for( int j = 0; j < nBands; ++j )
                 {
@@ -8879,7 +8902,7 @@ void GTiffDataset::DiscardLsb( GByte* pabyBuffer, int nBytes, int iBand ) const
         {
             const int nMask = anMaskLsb[iBand];
             const int nOffset = anOffsetLsb[iBand];
-            for( int i = 0; i < nBytes/2; ++i )
+            for( decltype(nBytes) i = 0; i < nBytes/2; ++i )
             {
                 reinterpret_cast<GUInt16*>(pabyBuffer)[i] =
                     static_cast<GUInt16>(
@@ -8889,7 +8912,7 @@ void GTiffDataset::DiscardLsb( GByte* pabyBuffer, int nBytes, int iBand ) const
         }
         else
         {
-            for( int i = 0; i < nBytes/2; i += nBands )
+            for( decltype(nBytes) i = 0; i < nBytes/2; i += nBands )
             {
                 for( int j = 0; j < nBands; ++j )
                 {
@@ -8908,7 +8931,7 @@ void GTiffDataset::DiscardLsb( GByte* pabyBuffer, int nBytes, int iBand ) const
         {
             const int nMask = anMaskLsb[iBand];
             const int nOffset = anOffsetLsb[iBand];
-            for( int i = 0; i < nBytes/4; ++i )
+            for( decltype(nBytes) i = 0; i < nBytes/4; ++i )
             {
                 reinterpret_cast<GUInt32 *>(pabyBuffer)[i] =
                     (reinterpret_cast<GUInt32*>(pabyBuffer)[i] & nMask) |
@@ -8917,7 +8940,7 @@ void GTiffDataset::DiscardLsb( GByte* pabyBuffer, int nBytes, int iBand ) const
         }
         else
         {
-            for( int i = 0; i < nBytes/4; i += nBands )
+            for( decltype(nBytes) i = 0; i < nBytes/4; i += nBands )
             {
                 for( int j = 0; j < nBands; ++j )
                 {
@@ -9016,8 +9039,8 @@ CPLErr GTiffDataset::LoadBlockBuf( int nBlockId, bool bReadFromDisk )
 /* -------------------------------------------------------------------- */
 /*      Get block size.                                                 */
 /* -------------------------------------------------------------------- */
-    const int nBlockBufSize =
-        static_cast<int>(
+    const GPtrDiff_t nBlockBufSize =
+        static_cast<GPtrDiff_t>(
             TIFFIsTiled(hTIFF) ? TIFFTileSize(hTIFF) : TIFFStripSize(hTIFF));
     if( !nBlockBufSize )
     {
@@ -9066,7 +9089,7 @@ CPLErr GTiffDataset::LoadBlockBuf( int nBlockId, bool bReadFromDisk )
 /*      partially encoded.  This code reduces the requested data so     */
 /*      an error won't be reported in this case. (#1179)                */
 /* -------------------------------------------------------------------- */
-    int nBlockReqSize = nBlockBufSize;
+    auto nBlockReqSize = nBlockBufSize;
     const int nBlocksPerRow = DIV_ROUND_UP(nRasterXSize, nBlockXSize);
     const int nBlockYOff = (nBlockId % nBlocksPerBand) / nBlocksPerRow;
 
@@ -9177,8 +9200,8 @@ static void GTiffFillStreamableOffsetAndCount( TIFF* hTIFF, int nSize )
     }
     for( int i = 0; i < nBlockCount; ++i )
     {
-        int cc = bIsTiled ? static_cast<int>(TIFFTileSize(hTIFF)) :
-                            static_cast<int>(TIFFStripSize(hTIFF));
+        GPtrDiff_t cc = bIsTiled ? static_cast<GPtrDiff_t>(TIFFTileSize(hTIFF)) :
+                            static_cast<GPtrDiff_t>(TIFFStripSize(hTIFF));
         if( !bIsTiled )
         {
 /* -------------------------------------------------------------------- */
@@ -9278,7 +9301,8 @@ void GTiffDataset::Crystalize()
     }
     else
     {
-        TIFFSetDirectory( hTIFF, 0 );
+        TIFFSetDirectory( hTIFF,
+                      static_cast<tdir_t>(TIFFNumberOfDirectories(hTIFF) - 1) );
     }
 
     // Now, reset zip and tiff quality and jpegcolormode.
@@ -10042,6 +10066,8 @@ CPLErr GTiffDataset::RegisterNewOverviewDataset(toff_t nOverviewOffset,
     poODS->nZLevel = nZLevel;
     poODS->nLZMAPreset = nLZMAPreset;
     poODS->nZSTDLevel = nZSTDLevel;
+    poODS->nWebPLevel = nWebPLevel;
+    poODS->bWebPLossless = bWebPLossless;
     poODS->nJpegTablesMode = nJpegTablesMode;
 #if HAVE_LERC
     poODS->dfMaxZError = dfMaxZError;
@@ -10904,8 +10930,6 @@ static void GTiffWriteDummyGeokeyDirectory( TIFF* hTIFF )
     }
 }
 
-#if LIBGEOTIFF_VERSION >= 1430
-
 /************************************************************************/
 /*               GTiffDatasetLibGeotiffErrorCallback()                  */
 /************************************************************************/
@@ -10927,20 +10951,13 @@ static void GTiffDatasetLibGeotiffErrorCallback(GTIF*,
 
 static GTIF* GTiffDatasetGTIFNew( TIFF* hTIFF )
 {
-    return GTIFNewEx(hTIFF, GTiffDatasetLibGeotiffErrorCallback, nullptr);
+    GTIF* gtif = GTIFNewEx(hTIFF, GTiffDatasetLibGeotiffErrorCallback, nullptr);
+    if( gtif )
+    {
+        GTIFAttachPROJContext(gtif, OSRGetProjTLSContext());
+    }
+    return gtif;
 }
-#else
-
-/************************************************************************/
-/*                           GTiffDatasetGTIFNew()                      */
-/************************************************************************/
-
-static GTIF* GTiffDatasetGTIFNew( TIFF* hTIFF )
-{
-    return GTIFNew(hTIFF);
-}
-#endif
-
 
 /************************************************************************/
 /*                          WriteGeoTIFFInfo()                          */
@@ -11022,7 +11039,7 @@ void GTiffDataset::WriteGeoTIFFInfo()
                 int bHasOffset = FALSE;
                 dfOffset = GetRasterBand(1)->GetOffset(&bHasOffset);
                 const bool bApplyScaleOffset =
-                    HasVerticalCS(GetProjectionRef()) &&
+                    oSRS.IsVertical() &&
                     GetRasterCount() == 1;
                 if( bApplyScaleOffset && !bHasScale )
                     dfScale = 1.0;
@@ -11111,8 +11128,7 @@ void GTiffDataset::WriteGeoTIFFInfo()
 /* -------------------------------------------------------------------- */
 /*      Write out projection definition.                                */
 /* -------------------------------------------------------------------- */
-    const bool bHasProjection =
-        pszProjection != nullptr && strlen(pszProjection) > 0;
+    const bool bHasProjection = !oSRS.IsEmpty();
     if( (bHasProjection || bPixelIsPoint)
         && !EQUAL(osProfile,szPROFILE_BASELINE) )
     {
@@ -11127,7 +11143,11 @@ void GTiffDataset::WriteGeoTIFFInfo()
         // Set according to coordinate system.
         if( bHasProjection )
         {
-            GTIFSetFromOGISDefnEx( psGTIF, pszProjection, eGeoTIFFKeysFlavor );
+            char* pszProjection = nullptr;
+            oSRS.exportToWkt(&pszProjection);
+            if( pszProjection && pszProjection[0] )
+                GTIFSetFromOGISDefnEx( psGTIF, pszProjection, eGeoTIFFKeysFlavor );
+            CPLFree(pszProjection);
         }
 
         if( bPixelIsPoint )
@@ -11600,7 +11620,8 @@ bool GTiffDataset::WriteMetadata( GDALDataset *poSrcDS, TIFF *l_hTIFF,
         if( poSrcDS->GetGeoTransform(adfGeoTransform) == CE_None &&
             adfGeoTransform[2] == 0.0 && adfGeoTransform[4] == 0.0
             && adfGeoTransform[5] < 0.0 &&
-            HasVerticalCS(poSrcDS->GetProjectionRef()) &&
+            poSrcDS->GetSpatialRef() &&
+            poSrcDS->GetSpatialRef()->IsVertical() &&
             poSrcDS->GetRasterCount() == 1 )
         {
             bGeoTIFFScaleOffsetInZ = true;
@@ -12051,6 +12072,10 @@ bool GTiffDataset::SetDirectory( toff_t nNewOffset )
             TIFFSetField(hTIFF, TIFFTAG_LERC_MAXZERROR, dfMaxZError);
         }
 #endif
+        if( nWebPLevel > 0 && nCompression == COMPRESSION_WEBP)
+            TIFFSetField(hTIFF, TIFFTAG_WEBP_LEVEL, nWebPLevel);
+        if( bWebPLossless && nCompression == COMPRESSION_WEBP)
+            TIFFSetField(hTIFF, TIFFTAG_WEBP_LOSSLESS, 1);
     }
 
     return true;
@@ -12608,8 +12633,7 @@ void GTiffDataset::LookForProjection()
 /* -------------------------------------------------------------------- */
 /*      Capture the GeoTIFF projection, if available.                   */
 /* -------------------------------------------------------------------- */
-    CPLFree( pszProjection );
-    pszProjection = nullptr;
+    oSRS.Clear();
 
     GTIF *hGTIF = GTiffDatasetGTIFNew(hTIFF);
 
@@ -12620,23 +12644,36 @@ void GTiffDataset::LookForProjection()
     }
     else
     {
-#if LIBGEOTIFF_VERSION >= 1410
         GTIFDefn *psGTIFDefn = GTIFAllocDefn();
-#else
-        GTIFDefn *psGTIFDefn =
-            static_cast<GTIFDefn *>(CPLCalloc(1, sizeof(GTIFDefn)));
-#endif
 
         if( GTIFGetDefn( hGTIF, psGTIFDefn ) )
         {
-            pszProjection = GTIFGetOGISDefn( hGTIF, psGTIFDefn );
-
-            if( STARTS_WITH_CI(pszProjection, "COMPD_CS") )
+            char* pszProjection = GTIFGetOGISDefn( hGTIF, psGTIFDefn );
+            if( pszProjection )
             {
-                OGRSpatialReference oSRS;
+                oSRS.SetFromUserInput(pszProjection);
+                double adfTOWGS84[7];
+                bool bHasTOWGS84 = oSRS.GetTOWGS84(&adfTOWGS84[0], 7) == OGRERR_NONE;
+                const char* pszCode = oSRS.GetAuthorityCode(nullptr);
+                if( pszCode )
+                {
+                    oSRS.importFromEPSG(atoi(pszCode));
+                    if( bHasTOWGS84 )
+                    {
+                        oSRS.SetTOWGS84(adfTOWGS84[0],
+                                        adfTOWGS84[1],
+                                        adfTOWGS84[2],
+                                        adfTOWGS84[3],
+                                        adfTOWGS84[4],
+                                        adfTOWGS84[5],
+                                        adfTOWGS84[6]);
+                    }
+                }
+            }
+            CPLFree(pszProjection);
 
-                oSRS.importFromWkt( pszProjection );
-
+            if( oSRS.IsCompound() )
+            {
                 const char* pszVertUnit = nullptr;
                 oSRS.GetTargetLinearUnits("COMPD_CS|VERT_CS", &pszVertUnit);
                 if( pszVertUnit && !EQUAL(pszVertUnit, "unknown") )
@@ -12651,8 +12688,6 @@ void GTiffDataset::LookForProjection()
                     CPLDebug( "GTiff", "Got COMPD_CS, but stripping it." );
 
                     oSRS.StripVertical();
-                    CPLFree( pszProjection );
-                    oSRS.exportToWkt( &pszProjection );
                 }
             }
         }
@@ -12662,25 +12697,12 @@ void GTiffDataset::LookForProjection()
         AdjustLinearUnit(psGTIFDefn.UOMLength);
 #endif
 
-#if LIBGEOTIFF_VERSION >= 1410
         GTIFFreeDefn(psGTIFDefn);
-#else
-        CPLFree(psGTIFDefn);
-#endif
 
         GTiffDatasetSetAreaOrPointMD( hGTIF, oGTiffMDMD );
 
         GTIFFree( hGTIF );
     }
-
-    if( pszProjection == nullptr )
-    {
-        pszProjection = CPLStrdup( "" );
-    }
-    // else if( !EQUAL(pszProjection, "") )
-    // {
-    //     m_nProjectionGeorefSrcIndex = m_nINTERNALGeorefSrcIndex;
-    // }
 
     bGeoTIFFInfoChanged = false;
     bForceUnsetGTOrGCPs = false;
@@ -12761,11 +12783,10 @@ void GTiffDataset::ApplyPamInfo()
             (m_nINTERNALGeorefSrcIndex < 0 ||
              m_nPAMGeorefSrcIndex < m_nINTERNALGeorefSrcIndex) )
         {
-            const char *pszPamSRS = GDALPamDataset::GetProjectionRef();
-            if( pszPamSRS != nullptr && strlen(pszPamSRS) > 0 )
+            const auto* poPamSRS = GDALPamDataset::GetSpatialRef();
+            if( poPamSRS )
             {
-                CPLFree( pszProjection );
-                pszProjection = CPLStrdup( pszPamSRS );
+                oSRS = *poPamSRS;
                 bLookedForProjection = true;
                 // m_nProjectionGeorefSrcIndex = m_nPAMGeorefSrcIndex;
             }
@@ -12774,13 +12795,12 @@ void GTiffDataset::ApplyPamInfo()
         {
             if( m_nINTERNALGeorefSrcIndex >= 0 )
                 LookForProjection();
-            if( pszProjection == nullptr || strlen(pszProjection) == 0 )
+            if( oSRS.IsEmpty() )
             {
-                const char *pszPamSRS = GDALPamDataset::GetProjectionRef();
-                if( pszPamSRS != nullptr && strlen(pszPamSRS) > 0 )
+                const auto* poPamSRS = GDALPamDataset::GetSpatialRef();
+                if( poPamSRS )
                 {
-                    CPLFree( pszProjection );
-                    pszProjection = CPLStrdup( pszPamSRS );
+                    oSRS = *poPamSRS;
                     bLookedForProjection = true;
                     // m_nProjectionGeorefSrcIndex = m_nPAMGeorefSrcIndex;
                 }
@@ -12805,15 +12825,13 @@ void GTiffDataset::ApplyPamInfo()
         nGCPCount = nPamGCPCount;
         pasGCPList = GDALDuplicateGCPs(nGCPCount, GDALPamDataset::GetGCPs());
 
-        CPLFree( pszProjection );
-        pszProjection = nullptr;
         // m_nProjectionGeorefSrcIndex = m_nPAMGeorefSrcIndex;
 
-        const char *pszPamGCPProjection = GDALPamDataset::GetGCPProjection();
-        if( pszPamGCPProjection != nullptr && strlen(pszPamGCPProjection) > 0 )
-            pszProjection = CPLStrdup(pszPamGCPProjection);
+        const auto* poPamGCPSRS = GDALPamDataset::GetGCPSpatialRef();
+        if( poPamGCPSRS )
+            oSRS = *poPamGCPSRS;
         else
-            pszProjection = CPLStrdup("");
+            oSRS.Clear();
 
         bLookedForProjection = true;
     }
@@ -12985,16 +13003,26 @@ GDALDataset *GTiffDataset::OpenDir( GDALOpenInfo * poOpenInfo )
         return nullptr;
     }
 
+    if( poOpenInfo->eAccess == GA_Update &&
+        !CPLFetchBool(poOpenInfo->papszOpenOptions, "ALLOW_UPDATE", false) )
+    {
+        CPLError(
+            CE_Warning, CPLE_AppDefined,
+            "Opening a specific TIFF directory is not supported in "
+            "update mode. Switching to read-only" );
+    }
+
 /* -------------------------------------------------------------------- */
 /*      Try opening the dataset.                                        */
 /* -------------------------------------------------------------------- */
     if( !GTiffOneTimeInit() )
         return nullptr;
 
-    VSILFILE* l_fpL = VSIFOpenL(pszFilename, "r");
+    const char* pszFlag = poOpenInfo->eAccess == GA_Update ? "r+" : "r";
+    VSILFILE* l_fpL = VSIFOpenL(pszFilename, pszFlag);
     if( l_fpL == nullptr )
         return nullptr;
-    TIFF *l_hTIFF = VSI_TIFFOpen( pszFilename, "r", l_fpL );
+    TIFF *l_hTIFF = VSI_TIFFOpen( pszFilename, pszFlag, l_fpL );
     if( l_hTIFF == nullptr )
     {
         CPL_IGNORE_RET_VAL(VSIFCloseL(l_fpL));
@@ -13036,6 +13064,10 @@ GDALDataset *GTiffDataset::OpenDir( GDALOpenInfo * poOpenInfo )
     poDS->hTIFF = l_hTIFF;
     poDS->bCloseTIFFHandle = true;
 
+    uint16 l_nCompression = 0;
+    TIFFGetFieldDefaulted( l_hTIFF, TIFFTAG_COMPRESSION, &(l_nCompression) );
+    poDS->nCompression = l_nCompression;
+
     if( !EQUAL(pszFilename,poOpenInfo->pszFilename)
         && !STARTS_WITH_CI(poOpenInfo->pszFilename, "GTIFF_RAW:") )
     {
@@ -13044,20 +13076,12 @@ GDALDataset *GTiffDataset::OpenDir( GDALOpenInfo * poOpenInfo )
         poDS->osFilename = pszFilename;
     }
 
-    if( poOpenInfo->eAccess == GA_Update )
-    {
-        CPLError(
-            CE_Warning, CPLE_AppDefined,
-            "Opening a specific TIFF directory is not supported in "
-            "update mode. Switching to read-only" );
-    }
-
     if( poOpenInfo->AreSiblingFilesLoaded() )
         poDS->oOvManager.TransferSiblingFiles(
             poOpenInfo->StealSiblingFiles() );
 
     if( poDS->OpenOffset( l_hTIFF, &(poDS->poActiveDS),
-                          nOffset, false, GA_ReadOnly,
+                          nOffset, false, poOpenInfo->eAccess,
                           bAllowRGBAInterface, true ) != CE_None )
     {
         delete poDS;
@@ -13829,10 +13853,9 @@ CPLErr GTiffDataset::OpenOffset( TIFF *hTIFFIn,
     }
 
 /* -------------------------------------------------------------------- */
-/*      We don't support 'chunks' bigger than 2GB although libtiff v4   */
-/*      can.                                                            */
+/*      We can't support 'chunks' bigger than 2GB on 32 bit builds      */
 /* -------------------------------------------------------------------- */
-#if defined(BIGTIFF_SUPPORT)
+#if defined(BIGTIFF_SUPPORT) && SIZEOF_VOIDP == 4
     uint64 nChunkSize = 0;
     if( bTreatAsSplit || bTreatAsSplitBitmap )
     {
@@ -13853,7 +13876,8 @@ CPLErr GTiffDataset::OpenOffset( TIFF *hTIFFIn,
     if( nChunkSize > static_cast<uint64>(INT_MAX) )
     {
         CPLError( CE_Failure, CPLE_NotSupported,
-                  "Scanline/tile/strip size bigger than 2GB." );
+                  "Scanline/tile/strip size bigger than 2GB unsupported "
+                  "on 32-bit builds." );
         return CE_Failure;
     }
 #endif
@@ -13871,16 +13895,7 @@ CPLErr GTiffDataset::OpenOffset( TIFF *hTIFFIn,
         dfNoDataValue = CPLAtofM( pszText );
         if( nBitsPerSample == 32 && nSampleFormat == SAMPLEFORMAT_IEEEFP )
         {
-            if( fabs(dfNoDataValue - std::numeric_limits<float>::max()) <
-                         1e-10 * std::numeric_limits<float>::max() )
-            {
-                dfNoDataValue = std::numeric_limits<float>::max();
-            }
-            else if( fabs(dfNoDataValue - (-std::numeric_limits<float>::max())) <
-                            1e-10 * std::numeric_limits<float>::max() )
-            {
-                dfNoDataValue = -std::numeric_limits<float>::max();
-            }
+            dfNoDataValue = GDALAdjustNoDataCloseToFloatMax(dfNoDataValue);
         }
     }
 
@@ -14237,6 +14252,10 @@ CPLErr GTiffDataset::OpenOffset( TIFF *hTIFFIn,
             }
         }
 #endif
+    }
+    else if( nCompression == COMPRESSION_WEBP )
+    {
+        oGTiffMDMD.SetMetadataItem( "COMPRESSION", "WEBP", "IMAGE_STRUCTURE" );
     }
     else
     {
@@ -14602,19 +14621,23 @@ void GTiffDataset::LoadGeoreferencingAndPamIfNeeded()
                              padfTiePoints[2] != 0.0 ||
                              padfTiePoints[5] != 0.0) )
                         {
-                            /* modelTiePointTag = (pixel, line, z0, X, Y, Z0) */
-                            /* thus Z(some_point) = (z(some_point) - z0) * scaleZ + Z0 */
-                            /* equivalently written as */
-                            /* Z(some_point) = z(some_point) * scaleZ + offsetZ with */
-                            /* offsetZ = - z0 * scaleZ + Z0 */
-                            double dfScale = padfScale[2];
-                            double dfOffset =
-                                -padfTiePoints[2] * dfScale + padfTiePoints[5];
-                            GTiffRasterBand* poBand =
-                                cpl::down_cast<GTiffRasterBand*>(GetRasterBand(1));
-                            poBand->bHaveOffsetScale = true;
-                            poBand->dfScale = dfScale;
-                            poBand->dfOffset = dfOffset;
+                            LookForProjection();
+                            if( !oSRS.IsEmpty() && oSRS.IsVertical() )
+                            {
+                                /* modelTiePointTag = (pixel, line, z0, X, Y, Z0) */
+                                /* thus Z(some_point) = (z(some_point) - z0) * scaleZ + Z0 */
+                                /* equivalently written as */
+                                /* Z(some_point) = z(some_point) * scaleZ + offsetZ with */
+                                /* offsetZ = - z0 * scaleZ + Z0 */
+                                double dfScale = padfScale[2];
+                                double dfOffset =
+                                    -padfTiePoints[2] * dfScale + padfTiePoints[5];
+                                GTiffRasterBand* poBand =
+                                    cpl::down_cast<GTiffRasterBand*>(GetRasterBand(1));
+                                poBand->bHaveOffsetScale = true;
+                                poBand->dfScale = dfScale;
+                                poBand->dfOffset = dfOffset;
+                            }
                         }
                     }
                 }
@@ -14754,12 +14777,9 @@ void GTiffDataset::LoadGeoreferencingAndPamIfNeeded()
 /*      Did we find a tab file?  If so we will use its coordinate       */
 /*      system and give it precedence.                                  */
 /* -------------------------------------------------------------------- */
-        if( pszTabWKT != nullptr
-            && (pszProjection == nullptr || pszProjection[0] == '\0') )
+        if( pszTabWKT != nullptr && oSRS.IsEmpty() )
         {
-            CPLFree( pszProjection );
-            pszProjection = pszTabWKT;
-            pszTabWKT = nullptr;
+            oSRS.SetFromUserInput(pszTabWKT);
             bLookedForProjection = true;
         }
 
@@ -15121,6 +15141,29 @@ static double GTiffGetLERCMaxZError(char** papszOptions)
 }
 #endif
 
+static int GTiffGetWebPLevel(char** papszOptions)
+{
+    int nWebPLevel = -1;
+    const char* pszValue = CSLFetchNameValue( papszOptions, "WEBP_LEVEL" );
+    if( pszValue != nullptr )
+    {
+        nWebPLevel = atoi( pszValue );
+        if( !(nWebPLevel >= 1 && nWebPLevel <= 100) )
+        {
+            CPLError( CE_Warning, CPLE_IllegalArg,
+                      "WEBP_LEVEL=%s value not recognised, ignoring.",
+                      pszValue );
+            nWebPLevel = -1;
+        }
+    }
+    return nWebPLevel;
+}
+
+static bool GTiffGetWebPLossless(char** papszOptions)
+{
+    return CPLFetchBool( papszOptions, "WEBP_LOSSLESS", false);
+}
+
 static int GTiffGetZLevel(char** papszOptions)
 {
     int nZLevel = -1;
@@ -15325,6 +15368,8 @@ TIFF *GTiffDataset::CreateLL( const char * pszFilename,
     const int l_nZLevel = GTiffGetZLevel(papszParmList);
     const int l_nLZMAPreset = GTiffGetLZMAPreset(papszParmList);
     const int l_nZSTDLevel = GTiffGetZSTDPreset(papszParmList);
+    const int l_nWebPLevel = GTiffGetWebPLevel(papszParmList);
+    const bool l_bWebPLossless = GTiffGetWebPLossless(papszParmList);
     const int l_nJpegQuality = GTiffGetJpegQuality(papszParmList);
     const int l_nJpegTablesMode = GTiffGetJpegTablesMode(papszParmList);
 #if HAVE_LERC
@@ -15513,8 +15558,10 @@ TIFF *GTiffDataset::CreateLL( const char * pszFilename,
 /*      Try opening the dataset.                                        */
 /* -------------------------------------------------------------------- */
 
+    const bool bAppend = CPLFetchBool(papszParmList, "APPEND_SUBDATASET", false);
+
     char szOpeningFlag[5] = {};
-    strcpy(szOpeningFlag, "w+");
+    strcpy(szOpeningFlag, bAppend ? "r+" : "w+");
     if( bCreateBigTIFF )
         strcat(szOpeningFlag, "8");
     if( eEndianness == ENDIANNESS_BIG )
@@ -15522,7 +15569,7 @@ TIFF *GTiffDataset::CreateLL( const char * pszFilename,
     else if( eEndianness == ENDIANNESS_LITTLE )
         strcat(szOpeningFlag, "l");
 
-    VSILFILE* l_fpL = VSIFOpenL( pszFilename, "w+b" );
+    VSILFILE* l_fpL = VSIFOpenL( pszFilename, bAppend ? "r+b" : "w+b" );
     if( l_fpL == nullptr )
     {
         CPLError( CE_Failure, CPLE_OpenFailed,
@@ -15540,6 +15587,11 @@ TIFF *GTiffDataset::CreateLL( const char * pszFilename,
                       pszFilename );
         CPL_IGNORE_RET_VAL(VSIFCloseL(l_fpL));
         return nullptr;
+    }
+
+    if( bAppend )
+    {
+        TIFFCreateDirectory( l_hTIFF );
     }
 
 /* -------------------------------------------------------------------- */
@@ -15896,6 +15948,10 @@ TIFF *GTiffDataset::CreateLL( const char * pszFilename,
         TIFFSetField( l_hTIFF, TIFFTAG_LERC_MAXZERROR, l_dfMaxZError );
     }
 #endif
+    if( l_nCompression == COMPRESSION_WEBP && l_nWebPLevel != -1)
+        TIFFSetField( l_hTIFF, TIFFTAG_WEBP_LEVEL, l_nWebPLevel);
+    if( l_nCompression == COMPRESSION_WEBP && l_bWebPLossless)
+        TIFFSetField( l_hTIFF, TIFFTAG_WEBP_LOSSLESS, 1);
 
     if( l_nCompression == COMPRESSION_JPEG )
         TIFFSetField( l_hTIFF, TIFFTAG_JPEGTABLESMODE, l_nJpegTablesMode );
@@ -16051,7 +16107,7 @@ void GTiffWriteJPEGTables( TIFF* hTIFF,
             TIFFSetField( hTIFFTmp, TIFFTAG_JPEGTABLESMODE,
                             nJpegTablesModeIn);
 
-        int nBlockSize = nInMemImageWidth * nInMemImageHeight *
+        GPtrDiff_t nBlockSize = static_cast<GPtrDiff_t>(nInMemImageWidth) * nInMemImageHeight *
                                         ((nBands <= 4) ? nBands : 1);
         if( l_nBitsPerSample == 12 )
             nBlockSize = (nBlockSize * 3) / 2;
@@ -16454,6 +16510,21 @@ GDALDataset *GTiffDataset::Create( const char * pszFilename,
             TIFFSetField(l_hTIFF, TIFFTAG_JPEGCOLORMODE, JPEGCOLORMODE_RGB);
     }
 
+#ifdef HAVE_LERC
+    if( poDS->nCompression == COMPRESSION_LERC )
+    {
+        uint32 nLercParamCount = 0;
+        uint32* panLercParms = nullptr;
+        if( TIFFGetField( l_hTIFF, TIFFTAG_LERC_PARAMETERS, &nLercParamCount,
+                          &panLercParms ) &&
+            nLercParamCount == 2 )
+        {
+            memcpy( poDS->anLercAddCompressionAndVersion, panLercParms,
+                    sizeof(poDS->anLercAddCompressionAndVersion) );
+        }
+    }
+#endif
+
 /* -------------------------------------------------------------------- */
 /*      Read palette back as a color table if it has one.               */
 /* -------------------------------------------------------------------- */
@@ -16515,6 +16586,8 @@ GDALDataset *GTiffDataset::Create( const char * pszFilename,
     poDS->nZLevel = GTiffGetZLevel(papszParmList);
     poDS->nLZMAPreset = GTiffGetLZMAPreset(papszParmList);
     poDS->nZSTDLevel = GTiffGetZSTDPreset(papszParmList);
+    poDS->nWebPLevel = GTiffGetWebPLevel(papszParmList);
+    poDS->bWebPLossless = GTiffGetWebPLossless(papszParmList);
     poDS->nJpegQuality = GTiffGetJpegQuality(papszParmList);
     poDS->nJpegTablesMode = GTiffGetJpegTablesMode(papszParmList);
 #if HAVE_LERC
@@ -16535,7 +16608,7 @@ GDALDataset *GTiffDataset::Create( const char * pszFilename,
                   "Writing zero block to force creation of JPEG tables." );
         if( TIFFIsTiled( l_hTIFF ) )
         {
-            const int cc = TIFFTileSize( l_hTIFF );
+            const auto cc = TIFFTileSize( l_hTIFF );
             unsigned char *pabyZeros =
                 static_cast<unsigned char *>(CPLCalloc(cc, 1));
             TIFFWriteEncodedTile(l_hTIFF, 0, pabyZeros, cc);
@@ -16543,7 +16616,7 @@ GDALDataset *GTiffDataset::Create( const char * pszFilename,
         }
         else
         {
-            const int cc = TIFFStripSize( l_hTIFF );
+            const auto cc = TIFFStripSize( l_hTIFF );
             unsigned char *pabyZeros =
                 static_cast<unsigned char *>(CPLCalloc(cc, 1));
             TIFFWriteEncodedStrip(l_hTIFF, 0, pabyZeros, cc);
@@ -16635,9 +16708,6 @@ GTiffDataset::CreateCopy( const char * pszFilename, GDALDataset *poSrcDS,
             }
         }
     }
-
-    if( !pfnProgress( 0.0, nullptr, pProgressData ) )
-        return nullptr;
 
 /* -------------------------------------------------------------------- */
 /*      Capture the profile.                                            */
@@ -16783,6 +16853,10 @@ GTiffDataset::CreateCopy( const char * pszFilename, GDALDataset *poSrcDS,
             }
             dfExtraSpaceForOverviews *=
                                 l_nBands * GDALGetDataTypeSizeBytes(eType);
+        }
+        else
+        {
+            CPLDebug("GTiff", "No source overviews to copy");
         }
     }
 
@@ -17077,14 +17151,14 @@ GTiffDataset::CreateCopy( const char * pszFilename, GDALDataset *poSrcDS,
 /* -------------------------------------------------------------------- */
 /*      Write affine transform if it is meaningful.                     */
 /* -------------------------------------------------------------------- */
-    const char *l_pszProjection = nullptr;
+    const OGRSpatialReference* l_poSRS = nullptr;
     double l_adfGeoTransform[6] = { 0.0 };
 
     if( poSrcDS->GetGeoTransform( l_adfGeoTransform ) == CE_None )
     {
         if( bGeoTIFF )
         {
-            l_pszProjection = poSrcDS->GetProjectionRef();
+            l_poSRS = poSrcDS->GetSpatialRef();
 
             if( l_adfGeoTransform[2] == 0.0 && l_adfGeoTransform[4] == 0.0
                 && l_adfGeoTransform[5] < 0.0 )
@@ -17100,7 +17174,7 @@ GTiffDataset::CreateCopy( const char * pszFilename, GDALDataset *poSrcDS,
                     dfOffset =
                         poSrcDS->GetRasterBand(1)->GetOffset(&bHasOffset);
                     const bool bApplyScaleOffset =
-                        HasVerticalCS(l_pszProjection) &&
+                        l_poSRS && l_poSRS->IsVertical() &&
                         poSrcDS->GetRasterCount() == 1;
                     if( bApplyScaleOffset && !bHasScale )
                         dfScale = 1.0;
@@ -17196,7 +17270,7 @@ GTiffDataset::CreateCopy( const char * pszFilename, GDALDataset *poSrcDS,
                       6*poSrcDS->GetGCPCount(), padfTiePoints );
         CPLFree( padfTiePoints );
 
-        l_pszProjection = poSrcDS->GetGCPProjection();
+        l_poSRS = poSrcDS->GetGCPSpatialRef();
 
         if( CPLFetchBool( papszOptions, "TFW", false )
             || CPLFetchBool( papszOptions, "WORLDFILE", false ) )
@@ -17209,22 +17283,24 @@ GTiffDataset::CreateCopy( const char * pszFilename, GDALDataset *poSrcDS,
     }
     else
     {
-        l_pszProjection = poSrcDS->GetProjectionRef();
+        l_poSRS = poSrcDS->GetSpatialRef();
     }
 
 /* -------------------------------------------------------------------- */
 /*      Write the projection information, if possible.                  */
 /* -------------------------------------------------------------------- */
-    const bool bHasProjection =
-        l_pszProjection != nullptr && strlen(l_pszProjection) > 0;
+    const bool bHasProjection = l_poSRS != nullptr;
     if( (bHasProjection || bPixelIsPoint) && bGeoTIFF )
     {
         GTIF *psGTIF = GTiffDatasetGTIFNew( l_hTIFF );
 
         if( bHasProjection )
         {
-            GTIFSetFromOGISDefnEx( psGTIF, l_pszProjection,
+            char* pszWKT = nullptr;
+            l_poSRS->exportToWkt(&pszWKT);
+            GTIFSetFromOGISDefnEx( psGTIF, pszWKT,
                                    GetGTIFFKeysFlavor(papszOptions) );
+            CPLFree(pszWKT);
         }
 
         if( bPixelIsPoint )
@@ -17264,7 +17340,7 @@ GTiffDataset::CreateCopy( const char * pszFilename, GDALDataset *poSrcDS,
                   "Writing zero block to force creation of JPEG tables." );
         if( TIFFIsTiled( l_hTIFF ) )
         {
-            const int cc = TIFFTileSize( l_hTIFF );
+            const auto cc = TIFFTileSize( l_hTIFF );
             unsigned char *pabyZeros =
                 static_cast<unsigned char *>( CPLCalloc(cc, 1) );
             TIFFWriteEncodedTile( l_hTIFF, 0, pabyZeros, cc );
@@ -17272,7 +17348,7 @@ GTiffDataset::CreateCopy( const char * pszFilename, GDALDataset *poSrcDS,
         }
         else
         {
-            int cc = TIFFStripSize( l_hTIFF );
+            const auto cc = TIFFStripSize( l_hTIFF );
             unsigned char *pabyZeros =
                 static_cast<unsigned char *>( CPLCalloc(cc,1) );
             TIFFWriteEncodedStrip( l_hTIFF, 0, pabyZeros, cc );
@@ -17306,6 +17382,9 @@ GTiffDataset::CreateCopy( const char * pszFilename, GDALDataset *poSrcDS,
         GTiffFillStreamableOffsetAndCount( l_hTIFF, nSize );
         TIFFWriteDirectory( l_hTIFF );
     }
+    TIFFSetDirectory( l_hTIFF,
+                    static_cast<tdir_t>(TIFFNumberOfDirectories(l_hTIFF) - 1) );
+    const toff_t l_nDirOffset = TIFFCurrentDirOffset( l_hTIFF );
     TIFFFlush( l_hTIFF );
     XTIFFClose( l_hTIFF );
     l_hTIFF = nullptr;
@@ -17351,10 +17430,21 @@ GTiffDataset::CreateCopy( const char * pszFilename, GDALDataset *poSrcDS,
 /*      PAM facilities.                                                 */
 /* -------------------------------------------------------------------- */
     CPLString osFileName("GTIFF_RAW:");
+    const bool bAppend = CPLFetchBool(papszOptions, "APPEND_SUBDATASET", false);
+    if( bAppend )
+    {
+        osFileName += CPLSPrintf("GTIFF_DIR:off:" CPL_FRMT_GUIB ":",
+                                 static_cast<GUIntBig>(l_nDirOffset));
+    }
 
     osFileName += bStreaming ? l_osTmpFilename.c_str() : pszFilename;
 
     GDALOpenInfo oOpenInfo( osFileName, GA_Update );
+    if( bAppend )
+    {
+        static const char* const apszOpenOptions[] = { "ALLOW_UPDATE=YES", nullptr };
+        oOpenInfo.papszOpenOptions = const_cast<char**>(apszOpenOptions);
+    }
     if( bStreaming )
     {
         // In case of single strip file, there's a libtiff check that would
@@ -17375,6 +17465,7 @@ GTiffDataset::CreateCopy( const char * pszFilename, GDALDataset *poSrcDS,
         VSIUnlink( bStreaming ? l_osTmpFilename.c_str() : pszFilename );
         return nullptr;
     }
+    poDS->eAccess = GA_Update;
     poDS->osFilename = pszFilename;
 
     if( bStreaming )
@@ -17418,12 +17509,18 @@ GTiffDataset::CreateCopy( const char * pszFilename, GDALDataset *poSrcDS,
         }
     }
 
+    CPLString osOldGTIFF_REPORT_COMPD_CSVal(
+        CPLGetConfigOption("GTIFF_REPORT_COMPD_CS", ""));
+    CPLSetThreadLocalConfigOption("GTIFF_REPORT_COMPD_CS", "YES");
     poDS->CloneInfo( poSrcDS, nCloneInfoFlags );
+    CPLSetThreadLocalConfigOption("GTIFF_REPORT_COMPD_CS",
+        osOldGTIFF_REPORT_COMPD_CSVal.empty() ? nullptr :
+        osOldGTIFF_REPORT_COMPD_CSVal.c_str());
 
     if( !bGeoTIFF && (poDS->GetPamFlags() & GPF_DISABLED) == 0 )
     {
         // Copy georeferencing info to PAM if the profile is not GeoTIFF
-        poDS->GDALPamDataset::SetProjection(poDS->GetProjectionRef());
+        poDS->GDALPamDataset::SetSpatialRef(poDS->GetSpatialRef());
         double adfGeoTransform[6];
         if( poDS->GetGeoTransform(adfGeoTransform) == CE_None )
         {
@@ -17431,7 +17528,7 @@ GTiffDataset::CreateCopy( const char * pszFilename, GDALDataset *poSrcDS,
         }
         poDS->GDALPamDataset::SetGCPs(poDS->GetGCPCount(),
                                       poDS->GetGCPs(),
-                                      poDS->GetGCPProjection());
+                                      poDS->GetGCPSpatialRef());
     }
 
     poDS->papszCreationOptions = CSLDuplicate( papszOptions );
@@ -17521,6 +17618,8 @@ GTiffDataset::CreateCopy( const char * pszFilename, GDALDataset *poSrcDS,
     poDS->nZLevel = GTiffGetZLevel(papszOptions);
     poDS->nLZMAPreset = GTiffGetLZMAPreset(papszOptions);
     poDS->nZSTDLevel = GTiffGetZSTDPreset(papszOptions);
+    poDS->nWebPLevel = GTiffGetWebPLevel(papszOptions);
+    poDS->bWebPLossless = GTiffGetWebPLossless(papszOptions);
     poDS->nJpegQuality = GTiffGetJpegQuality(papszOptions);
     poDS->nJpegTablesMode = GTiffGetJpegTablesMode(papszOptions);
     poDS->GetDiscardLsbOption(papszOptions);
@@ -17566,15 +17665,29 @@ GTiffDataset::CreateCopy( const char * pszFilename, GDALDataset *poSrcDS,
         TIFFSetField( l_hTIFF, TIFFTAG_LERC_MAXZERROR, poDS->dfMaxZError );
     }
 #endif
+    if( l_nCompression == COMPRESSION_WEBP )
+    {
+        if( poDS->nWebPLevel != -1 )
+        {
+            TIFFSetField( l_hTIFF, TIFFTAG_WEBP_LEVEL, poDS->nWebPLevel );
+        }
+
+        if( poDS->bWebPLossless)
+        {
+          TIFFSetField( l_hTIFF, TIFFTAG_WEBP_LOSSLESS, poDS->bWebPLossless );
+        }
+    }
 
     // Precreate (internal) mask, so that the IBuildOverviews() below
     // has a chance to create also the overviews of the mask.
     CPLErr eErr = CE_None;
 
     const int nMaskFlags = poSrcDS->GetRasterBand(1)->GetMaskFlags();
+    bool bMask = false;
     if( !(nMaskFlags & (GMF_ALL_VALID|GMF_ALPHA|GMF_NODATA) )
-        && (nMaskFlags & GMF_PER_DATASET) )
+        && (nMaskFlags & GMF_PER_DATASET) && !bStreaming )
     {
+        bMask = true;
         eErr = poDS->CreateMaskBand( nMaskFlags );
     }
 
@@ -17587,7 +17700,9 @@ GTiffDataset::CreateCopy( const char * pszFilename, GDALDataset *poSrcDS,
 /* -------------------------------------------------------------------- */
 
     // For scaled progress due to overview copying.
-    double dfTotalPixels = static_cast<double>(nXSize) * nYSize;
+    const int nBandsWidthMask = l_nBands +  (bMask ? 1 : 0);
+    double dfTotalPixels =
+        static_cast<double>(nXSize) * nYSize * nBandsWidthMask;
     double dfCurPixels = 0;
 
     if( eErr == CE_None &&
@@ -17612,7 +17727,7 @@ GTiffDataset::CreateCopy( const char * pszFilename, GDALDataset *poSrcDS,
                 GDALRasterBand* poOvrBand =
                     poSrcDS->GetRasterBand(1)->GetOverview(i);
                 dfTotalPixels += static_cast<double>(poOvrBand->GetXSize()) *
-                                poOvrBand->GetYSize();
+                                poOvrBand->GetYSize() * nBandsWidthMask;
             }
 
             char* papszCopyWholeRasterOptions[2] = { nullptr, nullptr };
@@ -17635,7 +17750,7 @@ GTiffDataset::CreateCopy( const char * pszFilename, GDALDataset *poSrcDS,
                 double dfNextCurPixels =
                     dfCurPixels +
                     static_cast<double>(poOvrBand->GetXSize()) *
-                    poOvrBand->GetYSize();
+                    poOvrBand->GetYSize() * l_nBands;
 
                 void* pScaledData =
                     GDALCreateScaledProgress( dfCurPixels / dfTotalPixels,
@@ -17659,13 +17774,22 @@ GTiffDataset::CreateCopy( const char * pszFilename, GDALDataset *poSrcDS,
                 // Copy mask of the overview.
                 if( eErr == CE_None && poDS->poMaskDS != nullptr )
                 {
+                    dfNextCurPixels +=
+                        static_cast<double>(poOvrBand->GetXSize()) *
+                                            poOvrBand->GetYSize();
+                    pScaledData =
+                        GDALCreateScaledProgress( dfCurPixels / dfTotalPixels,
+                                            dfNextCurPixels / dfTotalPixels,
+                                            pfnProgress, pProgressData );
                     eErr =
                         GDALRasterBandCopyWholeRaster(
                             poOvrBand->GetMaskBand(),
                             poDS->papoOverviewDS[iOvrLevel]->
                             poMaskDS->GetRasterBand(1),
                             papszCopyWholeRasterOptions,
-                            GDALDummyProgress, nullptr);
+                            GDALScaledProgress, pScaledData );
+                    dfCurPixels = dfNextCurPixels;
+                    GDALDestroyScaledProgress(pScaledData);
                     poDS->papoOverviewDS[iOvrLevel]->poMaskDS->FlushCache();
                 }
             }
@@ -17675,9 +17799,12 @@ GTiffDataset::CreateCopy( const char * pszFilename, GDALDataset *poSrcDS,
 /* -------------------------------------------------------------------- */
 /*      Copy actual imagery.                                            */
 /* -------------------------------------------------------------------- */
-    void* pScaledData = GDALCreateScaledProgress(dfCurPixels / dfTotalPixels,
-                                                 1.0,
-                                                 pfnProgress, pProgressData);
+    double dfNextCurPixels =
+        dfCurPixels + static_cast<double>(nXSize) * nYSize * l_nBands;
+    void* pScaledData = GDALCreateScaledProgress(
+        dfCurPixels / dfTotalPixels,
+        dfNextCurPixels / dfTotalPixels,
+        pfnProgress, pProgressData);
 
 #if defined(HAVE_LIBJPEG) || defined(JPEG_DIRECT_COPY)
     bool bTryCopy = true;
@@ -17813,7 +17940,11 @@ GTiffDataset::CreateCopy( const char * pszFilename, GDALDataset *poSrcDS,
         }
 #endif
     }
-    else if( bTryCopy && eErr == CE_None )
+    else if( 
+#if defined(HAVE_LIBJPEG) || defined(JPEG_DIRECT_COPY)
+        bTryCopy &&
+#endif
+        eErr == CE_None )
     {
         char* papszCopyWholeRasterOptions[3] = { nullptr, nullptr, nullptr };
         int iNextOption = 0;
@@ -17868,6 +17999,10 @@ GTiffDataset::CreateCopy( const char * pszFilename, GDALDataset *poSrcDS,
 
     if( eErr == CE_None && !bStreaming )
     {
+        pScaledData = GDALCreateScaledProgress(
+            dfNextCurPixels / dfTotalPixels,
+            1.0,
+            pfnProgress, pProgressData);
         if( poDS->poMaskDS )
         {
             const char* l_papszOptions[2] = { "COMPRESSED=YES", nullptr };
@@ -17875,12 +18010,15 @@ GTiffDataset::CreateCopy( const char * pszFilename, GDALDataset *poSrcDS,
                                     poSrcDS->GetRasterBand(1)->GetMaskBand(),
                                     poDS->GetRasterBand(1)->GetMaskBand(),
                                     const_cast<char **>(l_papszOptions),
-                                    GDALDummyProgress, nullptr);
+                                    GDALScaledProgress, pScaledData );
         }
         else
         {
-            eErr = GDALDriver::DefaultCopyMasks( poSrcDS, poDS, bStrict );
+            eErr = GDALDriver::DefaultCopyMasks( poSrcDS, poDS, bStrict,
+                                                 nullptr,
+                                                 GDALScaledProgress, pScaledData );
         }
+        GDALDestroyScaledProgress(pScaledData);
     }
 
     if( eErr == CE_Failure )
@@ -17902,47 +18040,28 @@ GTiffDataset::CreateCopy( const char * pszFilename, GDALDataset *poSrcDS,
 }
 
 /************************************************************************/
-/*                          GetProjectionRef()                          */
+/*                          GetSpatialRef()                             */
 /************************************************************************/
 
-const char *GTiffDataset::GetProjectionRef()
+const OGRSpatialReference* GTiffDataset::GetSpatialRef() const
 
 {
     if( nGCPCount == 0 )
     {
-        LoadGeoreferencingAndPamIfNeeded();
-        LookForProjection();
+        const_cast<GTiffDataset*>(this)->LoadGeoreferencingAndPamIfNeeded();
+        const_cast<GTiffDataset*>(this)->LookForProjection();
 
-        return pszProjection;
+        return oSRS.IsEmpty() ? nullptr : &oSRS;
     }
 
-    return "";
-}
-
-
-/************************************************************************/
-/*                           HasVerticalCS()                            */
-/************************************************************************/
-
-bool GTiffDataset::HasVerticalCS(const char *pszProjectionIn)
-{
-    if( pszProjectionIn != nullptr && pszProjectionIn[0] != '\0' )
-    {
-        OGRSpatialReference oSRS;
-        oSRS.SetFromUserInput(pszProjectionIn);
-        return CPL_TO_BOOL(oSRS.IsVertical());
-    }
-    else
-    {
-        return false;
-    }
+    return nullptr;
 }
 
 /************************************************************************/
-/*                           SetProjection()                            */
+/*                           SetSpatialRef()                            */
 /************************************************************************/
 
-CPLErr GTiffDataset::SetProjection( const char * pszNewProjection )
+CPLErr GTiffDataset::SetSpatialRef( const OGRSpatialReference * poSRS )
 
 {
     if( bStreamingOut && bCrystalized )
@@ -17957,30 +18076,19 @@ CPLErr GTiffDataset::SetProjection( const char * pszNewProjection )
     LoadGeoreferencingAndPamIfNeeded();
     LookForProjection();
 
-    if( !STARTS_WITH_CI(pszNewProjection, "GEOGCS")
-        && !STARTS_WITH_CI(pszNewProjection, "PROJCS")
-        && !STARTS_WITH_CI(pszNewProjection, "LOCAL_CS")
-        && !STARTS_WITH_CI(pszNewProjection, "COMPD_CS")
-        && !STARTS_WITH_CI(pszNewProjection, "GEOCCS")
-        && !EQUAL(pszNewProjection,"") )
+    if( poSRS == nullptr || poSRS->IsEmpty() )
     {
-        CPLError( CE_Failure, CPLE_AppDefined,
-                "Only OGC WKT Projections supported for writing to GeoTIFF.  "
-                "%s not supported.",
-                  pszNewProjection );
-
-        return CE_Failure;
+        if( !oSRS.IsEmpty() )
+        {
+            bForceUnsetProjection = true;
+        }
+        oSRS.Clear();
     }
-
-    if( EQUAL(pszNewProjection, "") &&
-        pszProjection != nullptr &&
-        !EQUAL(pszProjection, "") )
+    else
     {
-        bForceUnsetProjection = true;
+        oSRS = *poSRS;
+        oSRS.SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
     }
-
-    CPLFree( pszProjection );
-    pszProjection = CPLStrdup( pszNewProjection );
 
     bGeoTIFFInfoChanged = true;
 
@@ -18080,22 +18188,22 @@ int GTiffDataset::GetGCPCount()
 }
 
 /************************************************************************/
-/*                          GetGCPProjection()                          */
+/*                          GetGCPSpatialRef()                          */
 /************************************************************************/
 
-const char *GTiffDataset::GetGCPProjection()
+const OGRSpatialReference *GTiffDataset::GetGCPSpatialRef() const
 
 {
-    LoadGeoreferencingAndPamIfNeeded();
+    const_cast<GTiffDataset*>(this)->LoadGeoreferencingAndPamIfNeeded();
 
     if( nGCPCount > 0 )
     {
-        LookForProjection();
+        const_cast<GTiffDataset*>(this)->LookForProjection();
     }
-    if( pszProjection != nullptr )
-        return pszProjection;
+    if( !oSRS.IsEmpty() )
+        return &oSRS;
 
-    return "";
+    return nullptr;
 }
 
 /************************************************************************/
@@ -18115,7 +18223,7 @@ const GDAL_GCP *GTiffDataset::GetGCPs()
 /************************************************************************/
 
 CPLErr GTiffDataset::SetGCPs( int nGCPCountIn, const GDAL_GCP *pasGCPListIn,
-                              const char *pszGCPProjection )
+                              const OGRSpatialReference *poGCPSRS )
 {
     LoadGeoreferencingAndPamIfNeeded();
 
@@ -18143,11 +18251,19 @@ CPLErr GTiffDataset::SetGCPs( int nGCPCountIn, const GDAL_GCP *pasGCPListIn,
             bForceUnsetGTOrGCPs = true;
         }
 
-        if( pszProjection != nullptr &&
-            !EQUAL(pszProjection, "") &&
-                   (pszGCPProjection == nullptr ||
-                   pszGCPProjection[0] == '\0') )
-            bForceUnsetProjection = true;
+        if( poGCPSRS == nullptr || poGCPSRS->IsEmpty() )
+        {
+            if( !oSRS.IsEmpty() )
+            {
+                bForceUnsetProjection = true;
+            }
+            oSRS.Clear();
+        }
+        else
+        {
+            oSRS = *poGCPSRS;
+            oSRS.SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
+        }
 
         if( nGCPCount > 0 )
         {
@@ -18158,8 +18274,6 @@ CPLErr GTiffDataset::SetGCPs( int nGCPCountIn, const GDAL_GCP *pasGCPListIn,
         nGCPCount = nGCPCountIn;
         pasGCPList = GDALDuplicateGCPs(nGCPCount, pasGCPListIn);
 
-        CPLFree( pszProjection );
-        pszProjection = CPLStrdup( pszGCPProjection );
         bGeoTIFFInfoChanged = true;
 
         return CE_None;
@@ -18918,12 +19032,6 @@ static
 void GDALDeregister_GTiff( GDALDriver * )
 
 {
-    CSVDeaccess( nullptr );
-
-#if defined(LIBGEOTIFF_VERSION) && LIBGEOTIFF_VERSION > 1150
-    GTIFDeaccessCSV();
-#endif
- 
 #ifdef HAVE_LERC
     if( pLercCodec )
         TIFFUnRegisterCODEC(pLercCodec);
@@ -18971,6 +19079,8 @@ int GTIFFGetCompressionMethod(const char* pszValue, const char* pszVariableName)
         nCompression = COMPRESSION_LERC;
     }
 #endif
+    else if( EQUAL( pszValue, "WEBP" ) )
+        nCompression = COMPRESSION_WEBP;
     else
         CPLError( CE_Warning, CPLE_IllegalArg,
                   "%s=%s value not recognised, ignoring.",
@@ -19005,6 +19115,7 @@ void GDALRegister_GTiff()
     bool bHasJPEG = false;
     bool bHasLZMA = false;
     bool bHasZSTD = false;
+    bool bHasWebP = false;
 
     GDALDriver *poDriver = new GDALDriver();
 
@@ -19080,6 +19191,12 @@ void GDALRegister_GTiff()
             osCompressValues +=
                     "       <Value>ZSTD</Value>";
         }
+        else if( c->scheme == COMPRESSION_WEBP )
+        {
+            bHasWebP = true;
+            osCompressValues +=
+                    "       <Value>WEBP</Value>";
+        }
     }
 #ifdef HAVE_LERC
     osCompressValues +=
@@ -19130,6 +19247,14 @@ void GDALRegister_GTiff()
     osOptions += ""
 "   <Option name='MAX_Z_ERROR' type='float' description='Maximum error for LERC compression' default='0'/>";
 #endif
+    if ( bHasWebP )
+    {
+      osOptions += ""
+#if WEBP_ENCODER_ABI_VERSION >= 0x0100
+"   <Option name='WEBP_LOSSLESS' type='boolean' description='Whether lossless compression should be used' default='FALSE'/>"
+#endif
+"   <Option name='WEBP_LEVEL' type='int' description='WEBP quality level. Low values result in higher compression ratios' default='75'/>";
+    }
     osOptions += ""
 "   <Option name='NUM_THREADS' type='string' description='Number of worker threads for compression. Can be set to ALL_CPUS' default='1'/>"
 "   <Option name='NBITS' type='int' description='BITS for sub-byte files (1-7), sub-uint16 (9-15), sub-uint32 (17-31), or float32 (16)'/>"
